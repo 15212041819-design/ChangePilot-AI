@@ -11,9 +11,7 @@ def main() -> None:
     print(f"正在连接模型：{settings.deepseek_model}")
     print(f"API 地址：{settings.deepseek_base_url}")
 
-    response = model.invoke(
-        "这是一次 API 连通性测试。请只回复：ChangePilot AI 模型连接成功"
-    )
+    response = model.invoke("这是一次 API 连通性测试。请只回复：ChangePilot AI 模型连接成功")
 
     print(f"模型响应：{response.content}")
 
