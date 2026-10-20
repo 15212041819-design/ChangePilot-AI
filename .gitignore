@@ -1,0 +1,37 @@
+# Python 虚拟环境
+.venv/
+venv/
+
+# Python 缓存和安装信息
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 测试和代码检查缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 本地环境变量和密钥
+.env
+.env.*
+!.env.example
+
+# PyCharm
+.idea/
+
+# Next.js / Node.js
+node_modules/
+.next/
+out/
+
+# 运行时产生的数据
+workspaces/
+artifacts/
+uploads/
+*.log
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
