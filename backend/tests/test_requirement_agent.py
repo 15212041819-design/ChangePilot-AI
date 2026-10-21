@@ -18,6 +18,12 @@ def test_requirement_agent_returns_structured_result() -> None:
                 ],
                 "risks": [
                     "正常用户可能因误操作被锁定"
+                ],
+                "assumptions": [
+                    "账号锁定期间是否允许管理员手动解锁尚未确认"
+                ],
+                "clarification_questions": [
+                    "是否需要支持管理员手动解除账号锁定？"
                 ]
             }
             """
@@ -33,6 +39,8 @@ def test_requirement_agent_returns_structured_result() -> None:
     assert result.change_type == "feature"
     assert result.affected_modules == ["authentication", "user"]
     assert len(result.acceptance_criteria) == 2
+    assert result.assumptions == ["账号锁定期间是否允许管理员手动解锁尚未确认"]
+    assert result.clarification_questions == ["是否需要支持管理员手动解除账号锁定？"]
 
 
 def test_requirement_agent_rejects_empty_request() -> None:
