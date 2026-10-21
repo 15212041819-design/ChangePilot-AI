@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from app.api.routes.changes import get_change_analysis_graph
@@ -154,6 +155,244 @@ def test_analyze_change_endpoint_rejects_blank_request() -> None:
 
         assert response.status_code == 422
         assert response.json()["detail"] == "变更需求不能为空。"
+    finally:
+        app.dependency_overrides.pop(
+            get_change_analysis_graph,
+            None,
+        )
+
+
+def fake_requirement_analyzer_with_assumptions(
+    request_text: str,
+) -> RequirementAnalysis:
+    """模拟包含未确认假设的需求分析结果。"""
+
+    return RequirementAnalysis(
+        summary=request_text,
+        change_type="feature",
+        affected_modules=["订单服务"],
+        acceptance_criteria=["待支付订单可以取消"],
+        risks=["订单状态可能发生冲突"],
+        # 该假设会触发正式工作流中的人工审核节点。
+        assumptions=["取消后的订单状态命名为 cancelled"],
+        # API 会把该问题包含在 review_prompt 中返回给客户端。
+        clarification_questions=["是否确认使用 cancelled 作为取消状态值？"],
+    )
+
+
+def build_reviewable_api_graph() -> CompiledStateGraph:
+    """创建支持人工暂停和恢复的 API 测试工作流。"""
+
+    return build_change_analysis_graph(
+        requirement_analyzer=fake_requirement_analyzer_with_assumptions,
+        repository_resolver=fake_repository_resolver,
+        repository_scanner=fake_repository_scanner,
+        code_impact_analyzer=fake_code_impact_analyzer,
+        # 启用正式需求人工审核节点。
+        human_review_enabled=True,
+        # 同一个图实例必须保留检查点，
+        # 否则第二个 HTTP 请求无法恢复第一次暂停的工作流。
+        checkpointer=InMemorySaver(),
+    )
+
+
+def test_analyze_change_endpoint_pauses_for_requirement_review() -> None:
+    """存在未确认假设时，分析接口应该返回待审核状态。"""
+
+    reviewable_graph = build_reviewable_api_graph()
+
+    def get_reviewable_graph() -> CompiledStateGraph:
+        """在本测试中始终返回同一个工作流实例。"""
+
+        return reviewable_graph
+
+    app.dependency_overrides[get_change_analysis_graph] = get_reviewable_graph
+
+    try:
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/v1/changes/analyze",
+            json={
+                "request_text": "为订单系统增加取消订单功能",
+                "repository_name": "order_service",
+            },
+        )
+
+        assert response.status_code == 200
+
+        response_body = response.json()
+
+        # 服务端应该生成可用于恢复工作流的 thread_id。
+        assert isinstance(response_body["thread_id"], str)
+        assert response_body["thread_id"]
+
+        # 工作流应该暂停在仓库扫描之前。
+        assert response_body["status"] == "awaiting_requirement_review"
+        assert response_body["code_impact_analysis"] is None
+        assert response_body["requirement_review"] is None
+
+        # 中断载荷应该包含智能体提出的假设和澄清问题。
+        assert response_body["review_prompt"]["type"] == "requirement_review"
+        assert response_body["review_prompt"]["assumptions"] == ["取消后的订单状态命名为 cancelled"]
+        assert response_body["review_prompt"]["clarification_questions"] == [
+            "是否确认使用 cancelled 作为取消状态值？"
+        ]
+    finally:
+        app.dependency_overrides.pop(
+            get_change_analysis_graph,
+            None,
+        )
+
+
+def test_resume_change_analysis_endpoint_approves_workflow() -> None:
+    """人工批准后，恢复接口应该完成代码影响分析。"""
+
+    reviewable_graph = build_reviewable_api_graph()
+
+    def get_reviewable_graph() -> CompiledStateGraph:
+        """返回持有当前测试检查点的工作流。"""
+
+        return reviewable_graph
+
+    app.dependency_overrides[get_change_analysis_graph] = get_reviewable_graph
+
+    try:
+        client = TestClient(app)
+
+        # 首次请求运行到人工审核节点并暂停。
+        analyze_response = client.post(
+            "/api/v1/changes/analyze",
+            json={
+                "request_text": "为订单系统增加取消订单功能",
+                "repository_name": "order_service",
+            },
+        )
+
+        assert analyze_response.status_code == 200
+
+        thread_id = analyze_response.json()["thread_id"]
+
+        # 使用首次响应中的 thread_id 批准并恢复工作流。
+        resume_response = client.post(
+            "/api/v1/changes/analyze/resume",
+            json={
+                "thread_id": thread_id,
+                "decision": {
+                    "action": "approve",
+                    "feedback": "确认使用 cancelled 状态。",
+                },
+            },
+        )
+
+        assert resume_response.status_code == 200
+
+        response_body = resume_response.json()
+
+        # 恢复前后必须属于同一个工作流。
+        assert response_body["thread_id"] == thread_id
+
+        # 批准后应该继续扫描仓库并生成代码影响分析。
+        assert response_body["status"] == "code_impact_analyzed"
+        assert response_body["review_prompt"] is None
+        assert response_body["requirement_review"]["action"] == "approve"
+        assert response_body["code_impact_analysis"] is not None
+        assert (
+            response_body["code_impact_analysis"]["impacted_files"][0]["path"]
+            == "order_app/service.py"
+        )
+    finally:
+        app.dependency_overrides.pop(
+            get_change_analysis_graph,
+            None,
+        )
+
+
+def test_resume_change_analysis_endpoint_rejects_workflow() -> None:
+    """人工拒绝后，恢复接口应该停止代码影响分析。"""
+
+    reviewable_graph = build_reviewable_api_graph()
+
+    def get_reviewable_graph() -> CompiledStateGraph:
+        """返回持有当前测试检查点的工作流。"""
+
+        return reviewable_graph
+
+    app.dependency_overrides[get_change_analysis_graph] = get_reviewable_graph
+
+    try:
+        client = TestClient(app)
+
+        # 启动并暂停一条新的工作流。
+        analyze_response = client.post(
+            "/api/v1/changes/analyze",
+            json={
+                "request_text": "为订单系统增加取消订单功能",
+                "repository_name": "order_service",
+            },
+        )
+
+        assert analyze_response.status_code == 200
+
+        thread_id = analyze_response.json()["thread_id"]
+
+        # 拒绝需求分析阶段提出的假设。
+        resume_response = client.post(
+            "/api/v1/changes/analyze/resume",
+            json={
+                "thread_id": thread_id,
+                "decision": {
+                    "action": "reject",
+                    "feedback": "状态名称需要重新讨论。",
+                },
+            },
+        )
+
+        assert resume_response.status_code == 200
+
+        response_body = resume_response.json()
+
+        # 拒绝后工作流结束，但不会产生代码影响分析。
+        assert response_body["thread_id"] == thread_id
+        assert response_body["status"] == "requirement_rejected"
+        assert response_body["review_prompt"] is None
+        assert response_body["requirement_review"]["action"] == "reject"
+        assert response_body["code_impact_analysis"] is None
+    finally:
+        app.dependency_overrides.pop(
+            get_change_analysis_graph,
+            None,
+        )
+
+
+def test_resume_change_analysis_endpoint_rejects_unknown_thread() -> None:
+    """恢复接口应该拒绝不存在的工作流标识。"""
+
+    reviewable_graph = build_reviewable_api_graph()
+
+    def get_reviewable_graph() -> CompiledStateGraph:
+        """返回带有空检查点存储的测试工作流。"""
+
+        return reviewable_graph
+
+    app.dependency_overrides[get_change_analysis_graph] = get_reviewable_graph
+
+    try:
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/v1/changes/analyze/resume",
+            json={
+                "thread_id": "unknown-workflow-thread",
+                "decision": {
+                    "action": "approve",
+                    "feedback": None,
+                },
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "没有找到指定的工作流。"
     finally:
         app.dependency_overrides.pop(
             get_change_analysis_graph,
