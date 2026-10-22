@@ -55,8 +55,13 @@ class ChangeAnalysisState(TypedDict):
 RequirementAnalyzer = Callable[[str], RequirementAnalysis]
 RepositoryResolver = Callable[[str], Path]
 RepositoryScanner = Callable[[str | Path], RepositorySnapshot]
+# 代码影响智能体接收需求分析、仓库快照和人工审核结果。
 CodeImpactAnalyzer = Callable[
-    [RequirementAnalysis, RepositorySnapshot],
+    [
+        RequirementAnalysis,
+        RepositorySnapshot,
+        RequirementReviewDecision | None,
+    ],
     CodeImpactAnalysis,
 ]
 
@@ -207,6 +212,10 @@ def create_code_impact_analysis_node(
         requirement_analysis = state["requirement_analysis"]
         repository_snapshot = state["repository_snapshot"]
 
+        # 人工审核结果可能不存在。
+        # 例如关闭 HITL 的旧流程或没有审核上下文的独立测试。
+        requirement_review = state.get("requirement_review")
+
         # 如果前面的节点没有产生结果，说明工作流状态异常。
         if requirement_analysis is None:
             raise RuntimeError("工作流缺少需求分析结果。")
@@ -214,9 +223,12 @@ def create_code_impact_analysis_node(
         if repository_snapshot is None:
             raise RuntimeError("工作流缺少代码仓库快照。")
 
+        # 将人工审核结果作为第三个参数传给代码影响智能体。
+        # 审核批准后，智能体可以使用已确认假设和人工反馈。
         impact_analysis = analyzer(
             requirement_analysis,
             repository_snapshot,
+            requirement_review,
         )
 
         return {

@@ -5,12 +5,16 @@ from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
 )
 
+from app.schemas.human_review import RequirementReviewDecision
 from app.schemas.repository import (
     RepositoryFile,
     RepositorySnapshot,
 )
 from app.schemas.requirement import RequirementAnalysis
-from app.services.code_impact_agent import analyze_code_impact
+from app.services.code_impact_agent import (
+    analyze_code_impact,
+    format_requirement_review,
+)
 
 
 def build_requirement() -> RequirementAnalysis:
@@ -179,5 +183,55 @@ def test_code_impact_agent_rejects_unknown_file() -> None:
         analyze_code_impact(
             requirement=build_requirement(),
             repository=build_repository(),
+            model=fake_model,
+        )
+
+
+def test_format_requirement_review_includes_approved_feedback() -> None:
+    """人工批准结果应该被转换成可传给智能体的上下文。"""
+
+    review = RequirementReviewDecision(
+        action="approve",
+        feedback=("审计日志需要记录订单号、取消时间和操作结果。"),
+    )
+
+    formatted_review = format_requirement_review(review)
+
+    # 审核动作和人工反馈都必须出现在模型上下文中。
+    assert '"action": "approve"' in formatted_review
+    assert "审计日志需要记录订单号、取消时间和操作结果" in (formatted_review)
+
+
+def test_code_impact_agent_rejects_unapproved_requirement() -> None:
+    """人工拒绝需求后，不应该继续调用代码影响智能体。"""
+
+    rejected_review = RequirementReviewDecision(
+        action="reject",
+        feedback="审计日志字段还需要进一步确认。",
+    )
+
+    # 即使提供了可用模型，函数也应该在调用模型之前拒绝执行。
+    fake_model = FakeListChatModel(
+        responses=[
+            """
+            {
+                "summary": "不应该生成该结果",
+                "impacted_files": [],
+                "new_files": [],
+                "test_files": [],
+                "dependency_changes": []
+            }
+            """
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="需求尚未通过人工审核",
+    ):
+        analyze_code_impact(
+            requirement=build_requirement(),
+            repository=build_repository(),
+            review=rejected_review,
             model=fake_model,
         )

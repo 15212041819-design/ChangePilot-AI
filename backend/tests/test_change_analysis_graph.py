@@ -13,6 +13,7 @@ from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
 )
+from app.schemas.human_review import RequirementReviewDecision
 from app.schemas.repository import (
     RepositoryFile,
     RepositorySnapshot,
@@ -75,11 +76,19 @@ def fake_repository_scanner(
 def fake_code_impact_analyzer(
     requirement: RequirementAnalysis,
     repository: RepositorySnapshot,
+    review: RequirementReviewDecision | None,
 ) -> CodeImpactAnalysis:
-    """模拟第二个代码影响分析智能体。"""
+    """模拟能够接收人工审核结果的代码影响分析智能体。"""
 
     assert requirement.change_type == "feature"
     assert repository.repository_name == "order_service"
+
+    # 当需求中包含假设时，必须先得到人工批准，
+    # 才能进入代码影响分析节点。
+    if requirement.assumptions:
+        assert review is not None
+        assert review.action == "approve"
+        assert review.feedback
 
     return CodeImpactAnalysis(
         summary="需要修改订单服务并补充测试",
