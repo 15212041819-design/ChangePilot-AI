@@ -6,9 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from app.graph.change_analysis import (
-    build_change_analysis_graph,
-)
+from app.graph.change_analysis import build_change_analysis_graph
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
@@ -24,7 +22,7 @@ from app.schemas.requirement import RequirementAnalysis
 def fake_requirement_analyzer(
     request_text: str,
 ) -> RequirementAnalysis:
-    """模拟第一个需求分析智能体。"""
+    """模拟首次需求分析智能体。"""
 
     return RequirementAnalysis(
         summary=f"分析结果：{request_text}",
@@ -107,7 +105,7 @@ def fake_code_impact_analyzer(
 
 
 def build_test_graph():
-    """创建全部使用假依赖的测试工作流。"""
+    """创建不启用人工审核的测试工作流。"""
 
     return build_change_analysis_graph(
         requirement_analyzer=fake_requirement_analyzer,
@@ -128,6 +126,7 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
             "normalized_request": "",
             "repository_name": "order_service",
             "requirement_analysis": None,
+            "requirement_review": None,
             "repository_snapshot": None,
             "code_impact_analysis": None,
             "status": "received",
@@ -160,6 +159,7 @@ def test_change_analysis_graph_rejects_empty_request() -> None:
                 "normalized_request": "",
                 "repository_name": "order_service",
                 "requirement_analysis": None,
+                "requirement_review": None,
                 "repository_snapshot": None,
                 "code_impact_analysis": None,
                 "status": "received",
@@ -187,17 +187,53 @@ def fake_requirement_analyzer_with_assumptions(
     )
 
 
+def fake_requirement_revision_analyzer(
+    request_text: str,
+    previous_analysis: RequirementAnalysis,
+    review_feedback: str,
+) -> RequirementAnalysis:
+    """模拟根据人工拒绝反馈重新分析需求。"""
+
+    # 验证修订节点正确传入了规范化后的原始需求。
+    assert request_text == "为订单系统增加取消订单功能"
+
+    # 验证修订节点传入的是上一轮需求分析结果。
+    assert previous_analysis.assumptions == ["取消后的订单状态命名为 cancelled"]
+
+    # 验证人工拒绝时填写的反馈被传给了修订智能体。
+    assert review_feedback == "状态名称需要重新讨论。"
+
+    return RequirementAnalysis(
+        summary=("为订单系统增加取消订单功能，并重新确认取消状态名称。"),
+        change_type="feature",
+        affected_modules=["订单服务"],
+        acceptance_criteria=[
+            "待支付订单可以取消",
+            "取消后的订单进入明确的取消状态",
+        ],
+        risks=["取消操作与支付操作可能发生状态冲突"],
+        # 修订后的需求仍然保留一个待确认假设，
+        # 因此工作流应当再次暂停并等待人工审核。
+        assumptions=["取消后的状态名称暂定为 cancelled_order"],
+        clarification_questions=["是否批准使用 cancelled_order 作为取消状态值？"],
+    )
+
+
 def build_reviewable_test_graph():
     """创建启用了人工审核和内存检查点的测试工作流。"""
 
     return build_change_analysis_graph(
-        requirement_analyzer=fake_requirement_analyzer_with_assumptions,
+        requirement_analyzer=(fake_requirement_analyzer_with_assumptions),
+        # 使用假的需求修订智能体，
+        # 避免测试过程中调用真实 DeepSeek。
+        requirement_revision_analyzer=(fake_requirement_revision_analyzer),
         repository_resolver=fake_repository_resolver,
         repository_scanner=fake_repository_scanner,
         code_impact_analyzer=fake_code_impact_analyzer,
         # 开启需求人工审核节点。
         human_review_enabled=True,
-        # 保存工作流暂停时的状态，以便使用同一个 thread_id 恢复。
+        # 保存工作流暂停时的状态，
+        # 以便使用同一个 thread_id 恢复工作流。
         checkpointer=InMemorySaver(),
     )
 
@@ -274,29 +310,30 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert completed_result["code_impact_analysis"] is not None
 
 
-def test_change_analysis_graph_stops_after_review_rejection() -> None:
-    """人工拒绝需求假设后，工作流不应扫描仓库。"""
+def test_change_analysis_graph_revises_after_review_rejection() -> None:
+    """人工拒绝后，工作流应修订需求并再次等待审核。"""
 
     graph = build_reviewable_test_graph()
 
-    # 拒绝测试必须使用独立的 thread_id，
-    # 防止读取批准测试产生的检查点状态。
+    # 每条测试工作流都使用独立的 thread_id，
+    # 防止读取其他测试产生的检查点状态。
     config = {
         "configurable": {
-            "thread_id": "requirement-review-rejected",
+            "thread_id": "requirement-review-revised",
         }
     }
 
     # 首次运行到人工审核节点后暂停。
-    paused_result = graph.invoke(
+    first_paused_result = graph.invoke(
         create_reviewable_initial_state(),
         config=config,
     )
 
-    assert "__interrupt__" in paused_result
+    assert "__interrupt__" in first_paused_result
+    assert first_paused_result["status"] == "requirement_analyzed"
 
-    # 模拟用户拒绝当前假设。
-    rejected_result = graph.invoke(
+    # 拒绝第一版需求分析，并提供具体修改意见。
+    second_paused_result = graph.invoke(
         Command(
             resume={
                 "action": "reject",
@@ -306,13 +343,53 @@ def test_change_analysis_graph_stops_after_review_rejection() -> None:
         config=config,
     )
 
-    review_decision = rejected_result["requirement_review"]
+    # 拒绝后不应结束工作流。
+    # 系统应调用需求修订智能体，并再次暂停等待人工审核。
+    assert "__interrupt__" in second_paused_result
+    assert second_paused_result["status"] == "requirement_revised"
 
-    # 拒绝后工作流应该直接结束。
-    assert rejected_result["status"] == "requirement_rejected"
+    # 上一轮拒绝结果已经被修订节点清除，
+    # 防止旧决定影响新一轮审核。
+    assert second_paused_result["requirement_review"] is None
+
+    # 在第二次批准前，仓库扫描和代码影响分析都不能执行。
+    assert second_paused_result["repository_snapshot"] is None
+    assert second_paused_result["code_impact_analysis"] is None
+
+    revised_analysis = second_paused_result["requirement_analysis"]
+
+    assert revised_analysis is not None
+    assert revised_analysis.summary == ("为订单系统增加取消订单功能，并重新确认取消状态名称。")
+    assert revised_analysis.assumptions == ["取消后的状态名称暂定为 cancelled_order"]
+
+    # 检查第二次人工审核展示的是修订后的假设和澄清问题。
+    second_interrupts = second_paused_result["__interrupt__"]
+
+    assert len(second_interrupts) == 1
+
+    second_review_prompt = second_interrupts[0].value
+
+    assert second_review_prompt["assumptions"] == ["取消后的状态名称暂定为 cancelled_order"]
+    assert second_review_prompt["clarification_questions"] == [
+        "是否批准使用 cancelled_order 作为取消状态值？"
+    ]
+
+    # 人工批准修订后的需求，继续运行同一条工作流。
+    completed_result = graph.invoke(
+        Command(
+            resume={
+                "action": "approve",
+                "feedback": "批准使用 cancelled_order 状态。",
+            }
+        ),
+        config=config,
+    )
+
+    review_decision = completed_result["requirement_review"]
+
+    # 第二次审核批准后，才允许扫描仓库并生成代码影响分析。
+    assert completed_result["status"] == "code_impact_analyzed"
     assert review_decision is not None
-    assert review_decision.action == "reject"
-
-    # 仓库扫描和代码影响分析都不应执行。
-    assert rejected_result["repository_snapshot"] is None
-    assert rejected_result["code_impact_analysis"] is None
+    assert review_decision.action == "approve"
+    assert completed_result["repository_snapshot"] is not None
+    assert completed_result["code_impact_analysis"] is not None

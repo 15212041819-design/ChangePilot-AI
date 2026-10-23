@@ -7,9 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from app.api.routes.changes import get_change_analysis_graph
-from app.graph.change_analysis import (
-    build_change_analysis_graph,
-)
+from app.graph.change_analysis import build_change_analysis_graph
 from app.main import app
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
@@ -26,7 +24,7 @@ from app.schemas.requirement import RequirementAnalysis
 def fake_requirement_analyzer(
     request_text: str,
 ) -> RequirementAnalysis:
-    """模拟需求分析智能体。"""
+    """模拟不包含待确认假设的需求分析智能体。"""
 
     return RequirementAnalysis(
         summary=request_text,
@@ -101,7 +99,7 @@ def fake_code_impact_analyzer(
 
 
 def get_test_change_analysis_graph() -> CompiledStateGraph:
-    """创建 API 测试使用的完整假工作流。"""
+    """创建不启用人工审核的 API 测试工作流。"""
 
     return build_change_analysis_graph(
         requirement_analyzer=fake_requirement_analyzer,
@@ -122,7 +120,7 @@ def test_analyze_change_endpoint() -> None:
         response = client.post(
             "/api/v1/changes/analyze",
             json={
-                "request_text": ("  为订单系统增加   取消功能  "),
+                "request_text": "  为订单系统增加   取消功能  ",
                 "repository_name": "order_service",
             },
         )
@@ -188,18 +186,53 @@ def fake_requirement_analyzer_with_assumptions(
     )
 
 
+def fake_requirement_revision_analyzer(
+    request_text: str,
+    previous_analysis: RequirementAnalysis,
+    review_feedback: str,
+) -> RequirementAnalysis:
+    """模拟根据人工拒绝反馈重新分析需求。"""
+
+    # 确认 API 工作流把原始需求正确传给修订智能体。
+    assert request_text == "为订单系统增加取消订单功能"
+
+    # 确认修订智能体收到的是上一版需求分析。
+    assert previous_analysis.assumptions == ["取消后的订单状态命名为 cancelled"]
+
+    # 确认用户提交的拒绝反馈没有在 API 层丢失。
+    assert review_feedback == "状态名称需要重新讨论。"
+
+    return RequirementAnalysis(
+        summary=("为订单系统增加取消订单功能，并重新确认取消状态名称。"),
+        change_type="feature",
+        affected_modules=["订单服务"],
+        acceptance_criteria=[
+            "待支付订单可以取消",
+            "取消后的订单进入明确的取消状态",
+        ],
+        risks=["取消操作与支付操作可能发生状态冲突"],
+        # 修订后仍然包含待确认假设，
+        # 因此 API 应再次返回 awaiting_requirement_review。
+        assumptions=["取消后的状态名称暂定为 cancelled_order"],
+        clarification_questions=["是否批准使用 cancelled_order 作为取消状态值？"],
+    )
+
+
 def build_reviewable_api_graph() -> CompiledStateGraph:
-    """创建支持人工暂停和恢复的 API 测试工作流。"""
+    """创建支持人工暂停、修订和恢复的 API 测试工作流。"""
 
     return build_change_analysis_graph(
-        requirement_analyzer=fake_requirement_analyzer_with_assumptions,
+        requirement_analyzer=(fake_requirement_analyzer_with_assumptions),
+        # 使用假的需求修订智能体，
+        # 避免 API 测试调用真实 DeepSeek。
+        requirement_revision_analyzer=(fake_requirement_revision_analyzer),
         repository_resolver=fake_repository_resolver,
         repository_scanner=fake_repository_scanner,
         code_impact_analyzer=fake_code_impact_analyzer,
         # 启用正式需求人工审核节点。
         human_review_enabled=True,
         # 同一个图实例必须保留检查点，
-        # 否则第二个 HTTP 请求无法恢复第一次暂停的工作流。
+        # 否则后续 HTTP 请求无法恢复暂停的工作流。
         checkpointer=InMemorySaver(),
     )
 
@@ -316,8 +349,8 @@ def test_resume_change_analysis_endpoint_approves_workflow() -> None:
         )
 
 
-def test_resume_change_analysis_endpoint_rejects_workflow() -> None:
-    """人工拒绝后，恢复接口应该停止代码影响分析。"""
+def test_resume_change_analysis_endpoint_revises_workflow() -> None:
+    """人工拒绝后，恢复接口应该返回修订后的待审核需求。"""
 
     reviewable_graph = build_reviewable_api_graph()
 
@@ -344,8 +377,8 @@ def test_resume_change_analysis_endpoint_rejects_workflow() -> None:
 
         thread_id = analyze_response.json()["thread_id"]
 
-        # 拒绝需求分析阶段提出的假设。
-        resume_response = client.post(
+        # 拒绝第一版需求分析，并提交具体修改意见。
+        revision_response = client.post(
             "/api/v1/changes/analyze/resume",
             json={
                 "thread_id": thread_id,
@@ -356,16 +389,58 @@ def test_resume_change_analysis_endpoint_rejects_workflow() -> None:
             },
         )
 
-        assert resume_response.status_code == 200
+        assert revision_response.status_code == 200
 
-        response_body = resume_response.json()
+        revision_body = revision_response.json()
 
-        # 拒绝后工作流结束，但不会产生代码影响分析。
-        assert response_body["thread_id"] == thread_id
-        assert response_body["status"] == "requirement_rejected"
-        assert response_body["review_prompt"] is None
-        assert response_body["requirement_review"]["action"] == "reject"
-        assert response_body["code_impact_analysis"] is None
+        # 拒绝后工作流不会结束，
+        # 而是修订需求并再次进入待审核状态。
+        assert revision_body["thread_id"] == thread_id
+        assert revision_body["status"] == "awaiting_requirement_review"
+
+        # 修订节点会清除上一轮拒绝决定，
+        # 等待用户对新版本重新作出审核决定。
+        assert revision_body["requirement_review"] is None
+        assert revision_body["code_impact_analysis"] is None
+
+        # API 应返回修订后的需求分析。
+        assert revision_body["requirement_analysis"]["summary"] == (
+            "为订单系统增加取消订单功能，并重新确认取消状态名称。"
+        )
+        assert revision_body["requirement_analysis"]["assumptions"] == [
+            "取消后的状态名称暂定为 cancelled_order"
+        ]
+
+        # 新的 review_prompt 应来自修订后的需求分析。
+        assert revision_body["review_prompt"]["assumptions"] == [
+            "取消后的状态名称暂定为 cancelled_order"
+        ]
+        assert revision_body["review_prompt"]["clarification_questions"] == [
+            "是否批准使用 cancelled_order 作为取消状态值？"
+        ]
+
+        # 再次使用同一个 thread_id 批准修订后的需求。
+        approval_response = client.post(
+            "/api/v1/changes/analyze/resume",
+            json={
+                "thread_id": thread_id,
+                "decision": {
+                    "action": "approve",
+                    "feedback": ("批准使用 cancelled_order 状态。"),
+                },
+            },
+        )
+
+        assert approval_response.status_code == 200
+
+        approval_body = approval_response.json()
+
+        # 第二次审核批准后，工作流才会完成代码影响分析。
+        assert approval_body["thread_id"] == thread_id
+        assert approval_body["status"] == "code_impact_analyzed"
+        assert approval_body["review_prompt"] is None
+        assert approval_body["requirement_review"]["action"] == "approve"
+        assert approval_body["code_impact_analysis"] is not None
     finally:
         app.dependency_overrides.pop(
             get_change_analysis_graph,

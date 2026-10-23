@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RequirementReviewPrompt(BaseModel):
@@ -58,3 +58,23 @@ class RequirementReviewDecision(BaseModel):
         default=None,
         description="人工审核补充说明",
     )
+
+    @model_validator(mode="after")
+    def validate_rejection_feedback(
+        self,
+    ) -> "RequirementReviewDecision":
+        """拒绝需求分析时必须提供具体的修改反馈。"""
+
+        # 去除反馈两端多余空格，避免只包含空格的内容通过校验。
+        normalized_feedback = self.feedback.strip() if self.feedback is not None else ""
+
+        # approve 允许不填写反馈。
+        # reject 必须说明需求分析需要如何修订。
+        if self.action == "reject" and not normalized_feedback:
+            raise ValueError("拒绝需求分析时必须提供修改反馈。")
+
+        # 把清理后的反馈保存回模型。
+        # 空的批准反馈统一保存为 None。
+        self.feedback = normalized_feedback or None
+
+        return self
