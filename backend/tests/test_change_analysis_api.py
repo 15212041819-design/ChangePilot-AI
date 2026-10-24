@@ -13,6 +13,7 @@ from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
 )
+from app.schemas.code_index import RepositorySymbolIndex
 from app.schemas.human_review import RequirementReviewDecision
 from app.schemas.repository import (
     RepositoryFile,
@@ -76,8 +77,14 @@ def fake_code_impact_analyzer(
     requirement: RequirementAnalysis,
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
+    symbol_index: RepositorySymbolIndex,
 ) -> CodeImpactAnalysis:
-    """模拟接收人工审核上下文的代码影响分析智能体。"""
+    """模拟接收审核结果和符号索引的代码影响分析智能体。"""
+
+    # API 工作流必须把当前仓库对应的索引传入智能体。
+    assert symbol_index.repository_name == repository.repository_name
+    assert symbol_index.symbol_count == 2
+    assert symbol_index.parse_error_count == 0
 
     # 人工审核模式下，
     # 包含假设的需求只能在批准后执行。
@@ -106,6 +113,7 @@ def fake_invalid_code_impact_analyzer(
     requirement: RequirementAnalysis,
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
+    symbol_index: RepositorySymbolIndex,
 ) -> CodeImpactAnalysis:
     """模拟代码影响分析结果没有通过真实性校验。"""
 
@@ -113,6 +121,8 @@ def fake_invalid_code_impact_analyzer(
     assert requirement.change_type == "feature"
     assert repository.repository_name == "order_service"
     assert review is None
+    assert symbol_index.repository_name == repository.repository_name
+    assert symbol_index.symbol_count == 2
 
     raise CodeImpactValidationError("impacted_files 包含仓库中不存在的文件：order_app/missing.py")
 

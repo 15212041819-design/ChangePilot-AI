@@ -1,4 +1,15 @@
-"""完整软件变更分析工作流的自动化测试。"""
+"""完整软件变更分析工作流的自动化测试。
+
+本模块验证 LangGraph 各节点的执行顺序以及人工审核分支。
+
+重点验证：
+
+1. 普通工作流能够完成需求分析、仓库扫描、符号索引和影响分析。
+2. 空需求会在调用智能体前被拒绝。
+3. 人工审核批准前不会扫描或索引仓库。
+4. 人工批准后才会建立符号索引并分析代码影响。
+5. 人工拒绝后会修订需求并再次等待审核。
+"""
 
 from pathlib import Path
 
@@ -6,12 +17,17 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from app.graph.change_analysis import build_change_analysis_graph
+from app.graph.change_analysis import (
+    build_change_analysis_graph,
+)
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
 )
-from app.schemas.human_review import RequirementReviewDecision
+from app.schemas.code_index import RepositorySymbolIndex
+from app.schemas.human_review import (
+    RequirementReviewDecision,
+)
 from app.schemas.repository import (
     RepositoryFile,
     RepositorySnapshot,
@@ -54,16 +70,16 @@ def fake_repository_scanner(
         repository_name="order_service",
         files=[
             RepositoryFile(
-                relative_path="order_app/service.py",
+                relative_path=("order_app/service.py"),
                 language="python",
                 size_bytes=100,
-                content="class OrderService: ...\n",
+                content=("class OrderService:\n    pass\n"),
             ),
             RepositoryFile(
-                relative_path="tests/test_service.py",
+                relative_path=("tests/test_service.py"),
                 language="python",
                 size_bytes=100,
-                content="def test_create_order(): ...\n",
+                content=("def test_create_order():\n    pass\n"),
             ),
         ],
         scanned_file_count=2,
@@ -75,14 +91,21 @@ def fake_code_impact_analyzer(
     requirement: RequirementAnalysis,
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
+    symbol_index: RepositorySymbolIndex,
 ) -> CodeImpactAnalysis:
-    """模拟能够接收人工审核结果的代码影响分析智能体。"""
+    """模拟接收仓库快照与符号索引的代码影响分析智能体。"""
 
     assert requirement.change_type == "feature"
     assert repository.repository_name == "order_service"
 
-    # 当需求中包含假设时，必须先得到人工批准，
-    # 才能进入代码影响分析节点。
+    # 验证工作流不是只建立索引，
+    # 而是确实把索引传给了代码影响分析智能体。
+    assert symbol_index.repository_name == repository.repository_name
+    assert symbol_index.symbol_count == 2
+    assert symbol_index.parse_error_count == 0
+
+    # 当需求中包含假设时，
+    # 必须先得到人工批准才能进入本节点。
     if requirement.assumptions:
         assert review is not None
         assert review.action == "approve"
@@ -93,7 +116,7 @@ def fake_code_impact_analyzer(
         impacted_files=[
             ImpactedFile(
                 path="order_app/service.py",
-                reason="订单服务缺少取消订单功能",
+                reason=("订单服务缺少取消订单功能"),
                 suggested_changes=["增加 cancel_order 方法"],
                 risk_level="medium",
             )
@@ -108,63 +131,80 @@ def build_test_graph():
     """创建不启用人工审核的测试工作流。"""
 
     return build_change_analysis_graph(
-        requirement_analyzer=fake_requirement_analyzer,
-        repository_resolver=fake_repository_resolver,
-        repository_scanner=fake_repository_scanner,
-        code_impact_analyzer=fake_code_impact_analyzer,
+        requirement_analyzer=(fake_requirement_analyzer),
+        repository_resolver=(fake_repository_resolver),
+        repository_scanner=(fake_repository_scanner),
+        code_impact_analyzer=(fake_code_impact_analyzer),
     )
+
+
+def create_initial_state() -> dict[str, object]:
+    """创建普通工作流使用的初始状态。"""
+
+    return {
+        "request_text": ("  为订单系统增加   取消功能  "),
+        "normalized_request": "",
+        "repository_name": "order_service",
+        "requirement_analysis": None,
+        "requirement_review": None,
+        "repository_snapshot": None,
+        "repository_symbol_index": None,
+        "code_impact_analysis": None,
+        "status": "received",
+    }
 
 
 def test_change_analysis_graph_runs_complete_workflow() -> None:
-    """工作流应该依次完成需求分析和代码影响分析。"""
+    """工作流应该完成扫描、索引和影响分析。"""
 
     graph = build_test_graph()
 
-    result = graph.invoke(
-        {
-            "request_text": "  为订单系统增加   取消功能  ",
-            "normalized_request": "",
-            "repository_name": "order_service",
-            "requirement_analysis": None,
-            "requirement_review": None,
-            "repository_snapshot": None,
-            "code_impact_analysis": None,
-            "status": "received",
-        }
-    )
+    result = graph.invoke(create_initial_state())
 
     requirement_analysis = result["requirement_analysis"]
+    repository_snapshot = result["repository_snapshot"]
+    repository_symbol_index = result["repository_symbol_index"]
     code_impact_analysis = result["code_impact_analysis"]
 
-    assert result["normalized_request"] == "为订单系统增加 取消功能"
-    assert result["status"] == "code_impact_analyzed"
+    assert result["normalized_request"] == ("为订单系统增加 取消功能")
+    assert result["status"] == ("code_impact_analyzed")
+
     assert requirement_analysis is not None
+    assert repository_snapshot is not None
+    assert repository_symbol_index is not None
     assert code_impact_analysis is not None
+
     assert requirement_analysis.change_type == "feature"
+
+    # 假仓库包含一个类和一个测试函数，
+    # 因此符号索引总数应该为 2。
+    assert repository_symbol_index.symbol_count == 2
+    assert repository_symbol_index.import_count == 0
+    assert repository_symbol_index.parse_error_count == 0
+
+    indexed_file_paths = {indexed_file.file_path for indexed_file in repository_symbol_index.files}
+
+    assert indexed_file_paths == {
+        "order_app/service.py",
+        "tests/test_service.py",
+    }
+
     assert code_impact_analysis.impacted_files[0].path == "order_app/service.py"
 
 
 def test_change_analysis_graph_rejects_empty_request() -> None:
-    """空需求应该在进入智能体之前被拒绝。"""
+    """空需求应该在进入智能体前被拒绝。"""
 
     graph = build_test_graph()
+
+    initial_state = create_initial_state()
+    initial_state["request_text"] = "   "
 
     with pytest.raises(
         ValueError,
         match="变更需求不能为空",
     ):
-        graph.invoke(
-            {
-                "request_text": "   ",
-                "normalized_request": "",
-                "repository_name": "order_service",
-                "requirement_analysis": None,
-                "requirement_review": None,
-                "repository_snapshot": None,
-                "code_impact_analysis": None,
-                "status": "received",
-            }
-        )
+        graph.invoke(initial_state)
 
 
 def fake_requirement_analyzer_with_assumptions(
@@ -180,9 +220,8 @@ def fake_requirement_analyzer_with_assumptions(
         acceptance_criteria=["待支付订单可以取消"],
         risks=["订单状态可能发生冲突"],
         # 该内容没有在用户原始需求中明确说明，
-        # 因此必须等待人工确认后才能进入代码影响分析。
+        # 因此必须等待人工确认。
         assumptions=["取消后的订单状态命名为 cancelled"],
-        # 澄清问题用于帮助用户确认或否定上面的假设。
         clarification_questions=["是否确认使用 cancelled 作为取消状态值？"],
     )
 
@@ -194,14 +233,11 @@ def fake_requirement_revision_analyzer(
 ) -> RequirementAnalysis:
     """模拟根据人工拒绝反馈重新分析需求。"""
 
-    # 验证修订节点正确传入了规范化后的原始需求。
-    assert request_text == "为订单系统增加取消订单功能"
+    assert request_text == ("为订单系统增加取消订单功能")
 
-    # 验证修订节点传入的是上一轮需求分析结果。
     assert previous_analysis.assumptions == ["取消后的订单状态命名为 cancelled"]
 
-    # 验证人工拒绝时填写的反馈被传给了修订智能体。
-    assert review_feedback == "状态名称需要重新讨论。"
+    assert review_feedback == ("状态名称需要重新讨论。")
 
     return RequirementAnalysis(
         summary=("为订单系统增加取消订单功能，并重新确认取消状态名称。"),
@@ -212,148 +248,144 @@ def fake_requirement_revision_analyzer(
             "取消后的订单进入明确的取消状态",
         ],
         risks=["取消操作与支付操作可能发生状态冲突"],
-        # 修订后的需求仍然保留一个待确认假设，
-        # 因此工作流应当再次暂停并等待人工审核。
+        # 修订后仍然保留待确认假设，
+        # 因此工作流会再次暂停。
         assumptions=["取消后的状态名称暂定为 cancelled_order"],
         clarification_questions=["是否批准使用 cancelled_order 作为取消状态值？"],
     )
 
 
 def build_reviewable_test_graph():
-    """创建启用了人工审核和内存检查点的测试工作流。"""
+    """创建启用人工审核和检查点的测试工作流。"""
 
     return build_change_analysis_graph(
         requirement_analyzer=(fake_requirement_analyzer_with_assumptions),
-        # 使用假的需求修订智能体，
-        # 避免测试过程中调用真实 DeepSeek。
         requirement_revision_analyzer=(fake_requirement_revision_analyzer),
-        repository_resolver=fake_repository_resolver,
-        repository_scanner=fake_repository_scanner,
-        code_impact_analyzer=fake_code_impact_analyzer,
-        # 开启需求人工审核节点。
+        repository_resolver=(fake_repository_resolver),
+        repository_scanner=(fake_repository_scanner),
+        code_impact_analyzer=(fake_code_impact_analyzer),
         human_review_enabled=True,
-        # 保存工作流暂停时的状态，
-        # 以便使用同一个 thread_id 恢复工作流。
+        # 人工中断和恢复必须使用检查点。
         checkpointer=InMemorySaver(),
     )
 
 
 def create_reviewable_initial_state() -> dict[str, object]:
-    """创建人工审核工作流测试使用的初始状态。"""
+    """创建人工审核工作流使用的初始状态。"""
 
     return {
-        "request_text": "为订单系统增加取消订单功能",
+        "request_text": ("为订单系统增加取消订单功能"),
         "normalized_request": "",
         "repository_name": "order_service",
         "requirement_analysis": None,
         "requirement_review": None,
         "repository_snapshot": None,
+        "repository_symbol_index": None,
         "code_impact_analysis": None,
         "status": "received",
     }
 
 
 def test_change_analysis_graph_continues_after_review_approval() -> None:
-    """人工批准需求假设后，工作流应该继续分析代码影响。"""
+    """人工批准后才应该扫描、索引并分析代码。"""
 
     graph = build_reviewable_test_graph()
 
-    # thread_id 用于唯一标识本次工作流及其检查点。
     config = {
         "configurable": {
-            "thread_id": "requirement-review-approved",
+            "thread_id": ("requirement-review-approved"),
         }
     }
 
-    # 第一次调用会在人工审核节点的 interrupt() 处暂停。
+    # 第一次调用会在人工审核节点暂停。
     paused_result = graph.invoke(
         create_reviewable_initial_state(),
         config=config,
     )
 
-    # 暂停前已经完成需求分析，但尚未扫描代码仓库。
-    assert paused_result["status"] == "requirement_analyzed"
+    assert paused_result["status"] == ("requirement_analyzed")
     assert paused_result["requirement_analysis"] is not None
+
+    # 人工批准前不能读取或索引代码仓库。
     assert paused_result["repository_snapshot"] is None
+    assert paused_result["repository_symbol_index"] is None
     assert paused_result["code_impact_analysis"] is None
 
-    # invoke() 使用 __interrupt__ 返回需要展示给用户的审核信息。
     interrupts = paused_result["__interrupt__"]
 
     assert len(interrupts) == 1
 
     review_prompt = interrupts[0].value
 
-    assert review_prompt["type"] == "requirement_review"
+    assert review_prompt["type"] == ("requirement_review")
     assert review_prompt["assumptions"] == ["取消后的订单状态命名为 cancelled"]
     assert review_prompt["clarification_questions"] == ["是否确认使用 cancelled 作为取消状态值？"]
 
-    # 使用完全相同的 thread_id 恢复工作流。
-    # resume 中的数据会由 RequirementReviewDecision 负责校验。
+    # 使用相同 thread_id 批准并恢复工作流。
     completed_result = graph.invoke(
         Command(
             resume={
                 "action": "approve",
-                "feedback": "确认使用 cancelled 状态。",
+                "feedback": ("确认使用 cancelled 状态。"),
             }
         ),
         config=config,
     )
 
     review_decision = completed_result["requirement_review"]
+    symbol_index = completed_result["repository_symbol_index"]
 
-    # 批准后应该完成仓库扫描和代码影响分析。
-    assert completed_result["status"] == "code_impact_analyzed"
+    assert completed_result["status"] == ("code_impact_analyzed")
     assert review_decision is not None
     assert review_decision.action == "approve"
+
     assert completed_result["repository_snapshot"] is not None
+    assert symbol_index is not None
+    assert symbol_index.symbol_count == 2
+
     assert completed_result["code_impact_analysis"] is not None
 
 
 def test_change_analysis_graph_revises_after_review_rejection() -> None:
-    """人工拒绝后，工作流应修订需求并再次等待审核。"""
+    """人工拒绝后应修订需求并再次等待审核。"""
 
     graph = build_reviewable_test_graph()
 
-    # 每条测试工作流都使用独立的 thread_id，
-    # 防止读取其他测试产生的检查点状态。
     config = {
         "configurable": {
-            "thread_id": "requirement-review-revised",
+            "thread_id": ("requirement-review-revised"),
         }
     }
 
-    # 首次运行到人工审核节点后暂停。
     first_paused_result = graph.invoke(
         create_reviewable_initial_state(),
         config=config,
     )
 
     assert "__interrupt__" in first_paused_result
-    assert first_paused_result["status"] == "requirement_analyzed"
+    assert first_paused_result["status"] == ("requirement_analyzed")
 
-    # 拒绝第一版需求分析，并提供具体修改意见。
+    # 拒绝第一版需求并提供修改意见。
     second_paused_result = graph.invoke(
         Command(
             resume={
                 "action": "reject",
-                "feedback": "状态名称需要重新讨论。",
+                "feedback": ("状态名称需要重新讨论。"),
             }
         ),
         config=config,
     )
 
-    # 拒绝后不应结束工作流。
-    # 系统应调用需求修订智能体，并再次暂停等待人工审核。
+    # 修订后再次暂停等待审核。
     assert "__interrupt__" in second_paused_result
-    assert second_paused_result["status"] == "requirement_revised"
+    assert second_paused_result["status"] == ("requirement_revised")
 
-    # 上一轮拒绝结果已经被修订节点清除，
-    # 防止旧决定影响新一轮审核。
+    # 旧审核结果已经清除。
     assert second_paused_result["requirement_review"] is None
 
-    # 在第二次批准前，仓库扫描和代码影响分析都不能执行。
+    # 第二次批准前仍然不能扫描或索引仓库。
     assert second_paused_result["repository_snapshot"] is None
+    assert second_paused_result["repository_symbol_index"] is None
     assert second_paused_result["code_impact_analysis"] is None
 
     revised_analysis = second_paused_result["requirement_analysis"]
@@ -362,7 +394,6 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     assert revised_analysis.summary == ("为订单系统增加取消订单功能，并重新确认取消状态名称。")
     assert revised_analysis.assumptions == ["取消后的状态名称暂定为 cancelled_order"]
 
-    # 检查第二次人工审核展示的是修订后的假设和澄清问题。
     second_interrupts = second_paused_result["__interrupt__"]
 
     assert len(second_interrupts) == 1
@@ -374,22 +405,26 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
         "是否批准使用 cancelled_order 作为取消状态值？"
     ]
 
-    # 人工批准修订后的需求，继续运行同一条工作流。
+    # 批准修订后的需求，继续同一条工作流。
     completed_result = graph.invoke(
         Command(
             resume={
                 "action": "approve",
-                "feedback": "批准使用 cancelled_order 状态。",
+                "feedback": ("批准使用 cancelled_order 状态。"),
             }
         ),
         config=config,
     )
 
     review_decision = completed_result["requirement_review"]
+    symbol_index = completed_result["repository_symbol_index"]
 
-    # 第二次审核批准后，才允许扫描仓库并生成代码影响分析。
-    assert completed_result["status"] == "code_impact_analyzed"
+    assert completed_result["status"] == ("code_impact_analyzed")
     assert review_decision is not None
     assert review_decision.action == "approve"
+
     assert completed_result["repository_snapshot"] is not None
+    assert symbol_index is not None
+    assert symbol_index.symbol_count == 2
+
     assert completed_result["code_impact_analysis"] is not None

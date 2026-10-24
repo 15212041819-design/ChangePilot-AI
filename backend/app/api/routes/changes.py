@@ -208,6 +208,8 @@ def analyze_change(
                 "requirement_analysis": None,
                 "requirement_review": None,
                 "repository_snapshot": None,
+                # 符号索引将在仓库扫描完成后由工作流节点写入。
+                "repository_symbol_index": None,
                 "code_impact_analysis": None,
                 "status": "received",
             },
