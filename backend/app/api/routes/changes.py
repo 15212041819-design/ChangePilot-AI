@@ -19,6 +19,9 @@ from app.schemas.human_review import (
     RequirementReviewPrompt,
 )
 from app.schemas.requirement import RequirementAnalysis
+from app.tools.code_impact_validator import (
+    CodeImpactValidationError,
+)
 from app.tools.workspace import WorkspacePathError
 
 router = APIRouter(
@@ -63,7 +66,11 @@ def extract_review_prompt(
     first_interrupt = raw_interrupts[0]
 
     # Interrupt 对象的 value 属性保存传给 interrupt() 的载荷。
-    interrupt_value = getattr(first_interrupt, "value", None)
+    interrupt_value = getattr(
+        first_interrupt,
+        "value",
+        None,
+    )
 
     try:
         # 再次通过 Pydantic 校验中断载荷，
@@ -137,7 +144,8 @@ def build_change_analysis_response(
     # 工作流发生中断时，从 __interrupt__ 中读取待审核内容。
     review_prompt = extract_review_prompt(result)
 
-    # 图内部状态仍停留在 requirement_analyzed。
+    # 图内部状态可能停留在 requirement_analyzed
+    # 或 requirement_revised。
     # API 使用更明确的状态告诉客户端当前正在等待人工审核。
     response_status = (
         "awaiting_requirement_review" if review_prompt is not None else workflow_status
@@ -205,6 +213,13 @@ def analyze_change(
             },
             config=config,
         )
+    except CodeImpactValidationError as exc:
+        # 模型已经返回结构化数据，
+        # 但文件路径没有通过真实仓库校验。
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
     except WorkspacePathError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -238,7 +253,8 @@ def resume_change_analysis(
 
     config = create_graph_config(request.thread_id)
 
-    # 先读取检查点，避免使用不存在的 thread_id 恢复工作流。
+    # 先读取检查点，
+    # 避免使用不存在的 thread_id 恢复工作流。
     snapshot = graph.get_state(config)
 
     if not snapshot.values:
@@ -247,7 +263,8 @@ def resume_change_analysis(
             detail="没有找到指定的工作流。",
         )
 
-    # 只有当前检查点确实存在中断时，才允许提交恢复命令。
+    # 只有当前检查点确实存在中断时，
+    # 才允许提交恢复命令。
     has_pending_interrupt = any(task.interrupts for task in snapshot.tasks)
 
     if not has_pending_interrupt:
@@ -265,6 +282,13 @@ def resume_change_analysis(
             ),
             config=config,
         )
+    except CodeImpactValidationError as exc:
+        # 人工审核恢复后执行代码影响分析时，
+        # 仍然必须拦截模型返回的不可信文件路径。
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
     except WorkspacePathError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
