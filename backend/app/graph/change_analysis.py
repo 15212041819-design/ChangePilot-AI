@@ -11,7 +11,8 @@
 5. 使用 Python AST 为仓库建立结构化符号索引。
 6. 根据 Python 导入关系建立模块依赖图。
 7. 使用代码影响智能体分析需要修改的文件。
-8. 结束工作流并返回统一结果。
+8. 使用测试策略智能体生成可追踪的测试计划。
+9. 结束工作流并返回统一结果。
 
 符号索引和依赖图都会保存在 LangGraph 状态中，
 并作为代码影响智能体的正式输入，
@@ -35,11 +36,13 @@ from app.schemas.human_review import (
 )
 from app.schemas.repository import RepositorySnapshot
 from app.schemas.requirement import RequirementAnalysis
+from app.schemas.test_strategy import TestStrategy
 from app.services.code_impact_agent import analyze_code_impact
 from app.services.requirement_agent import (
     analyze_requirement,
     revise_requirement,
 )
+from app.services.test_strategy_agent import generate_test_strategy
 from app.tools.python_dependency_graph import (
     build_python_dependency_graph,
 )
@@ -82,6 +85,10 @@ class ChangeAnalysisState(TypedDict):
 
     # 代码影响智能体生成的代码影响分析。
     code_impact_analysis: CodeImpactAnalysis | None
+
+    # 测试策略智能体根据需求、影响分析和真实仓库证据
+    # 生成的结构化测试计划。
+    test_strategy: TestStrategy | None
 
     # 工作流目前执行到的阶段。
     status: str
@@ -142,6 +149,20 @@ CodeImpactAnalyzer = Callable[
         RepositoryDependencyGraph,
     ],
     CodeImpactAnalysis,
+]
+
+# 测试策略智能体接收需求、代码影响分析、仓库快照、
+# 人工审核结果、符号索引和模块依赖图。
+TestStrategyAnalyzer = Callable[
+    [
+        RequirementAnalysis,
+        CodeImpactAnalysis,
+        RepositorySnapshot,
+        RequirementReviewDecision | None,
+        RepositorySymbolIndex,
+        RepositoryDependencyGraph,
+    ],
+    TestStrategy,
 ]
 
 
@@ -255,7 +276,7 @@ def review_requirement(
             "requirement_review": (
                 RequirementReviewDecision(
                     action="approve",
-                    feedback=("需求分析中没有待确认假设，系统自动继续。"),
+                    feedback="需求分析中没有待确认假设，系统自动继续。",
                 )
             ),
             "status": "requirement_approved",
@@ -265,7 +286,7 @@ def review_requirement(
     # 转换成前端可以直接展示的审核载荷。
     review_prompt = RequirementReviewPrompt(
         summary=requirement_analysis.summary,
-        assumptions=(requirement_analysis.assumptions),
+        assumptions=requirement_analysis.assumptions,
         clarification_questions=(requirement_analysis.clarification_questions),
     )
 
@@ -329,7 +350,7 @@ def create_repository_scan_node(
         repository_snapshot = scanner(repository_path)
 
         return {
-            "repository_snapshot": (repository_snapshot),
+            "repository_snapshot": repository_snapshot,
             "status": "repository_scanned",
         }
 
@@ -361,7 +382,7 @@ def create_repository_symbol_index_node(
         repository_symbol_index = indexer(repository_snapshot)
 
         return {
-            "repository_symbol_index": (repository_symbol_index),
+            "repository_symbol_index": repository_symbol_index,
             "status": "repository_indexed",
         }
 
@@ -394,7 +415,7 @@ def create_repository_dependency_graph_node(
 
         return {
             "repository_dependency_graph": (repository_dependency_graph),
-            "status": ("repository_dependencies_mapped"),
+            "status": "repository_dependencies_mapped",
         }
 
     return repository_dependency_graph_node
@@ -456,16 +477,73 @@ def create_code_impact_analysis_node(
     return code_impact_analysis_node
 
 
+def create_test_strategy_node(
+    analyzer: TestStrategyAnalyzer,
+) -> Callable[
+    [ChangeAnalysisState],
+    dict[str, object],
+]:
+    """创建测试策略智能体节点。"""
+
+    def test_strategy_node(
+        state: ChangeAnalysisState,
+    ) -> dict[str, object]:
+        """根据需求、代码影响和仓库证据生成测试策略。"""
+
+        requirement_analysis = state["requirement_analysis"]
+        code_impact_analysis = state["code_impact_analysis"]
+        repository_snapshot = state["repository_snapshot"]
+        repository_symbol_index = state["repository_symbol_index"]
+        repository_dependency_graph = state["repository_dependency_graph"]
+        requirement_review = state.get("requirement_review")
+
+        # 测试策略是代码影响分析的下游结果，
+        # 所有上游证据都必须完整存在。
+        if requirement_analysis is None:
+            raise RuntimeError("工作流缺少需求分析结果。")
+
+        if code_impact_analysis is None:
+            raise RuntimeError("工作流缺少代码影响分析结果。")
+
+        if repository_snapshot is None:
+            raise RuntimeError("工作流缺少代码仓库快照。")
+
+        if repository_symbol_index is None:
+            raise RuntimeError("工作流缺少代码仓库符号索引。")
+
+        if repository_dependency_graph is None:
+            raise RuntimeError("工作流缺少代码仓库模块依赖图。")
+
+        # 测试策略 Agent 会再次校验代码影响中的文件路径，
+        # 并确保测试场景能够追踪到真实验收条件。
+        test_strategy = analyzer(
+            requirement_analysis,
+            code_impact_analysis,
+            repository_snapshot,
+            requirement_review,
+            repository_symbol_index,
+            repository_dependency_graph,
+        )
+
+        return {
+            "test_strategy": test_strategy,
+            "status": "test_strategy_generated",
+        }
+
+    return test_strategy_node
+
+
 def build_change_analysis_graph(
     requirement_analyzer: RequirementAnalyzer = (analyze_requirement),
-    requirement_revision_analyzer: (RequirementRevisionAnalyzer) = revise_requirement,
+    requirement_revision_analyzer: RequirementRevisionAnalyzer = (revise_requirement),
     repository_resolver: RepositoryResolver = (resolve_repository_directory),
-    repository_scanner: RepositoryScanner = (scan_repository),
-    repository_symbol_indexer: (RepositorySymbolIndexer) = index_python_symbols,
+    repository_scanner: RepositoryScanner = scan_repository,
+    repository_symbol_indexer: RepositorySymbolIndexer = (index_python_symbols),
     repository_dependency_graph_builder: (
         RepositoryDependencyGraphBuilder
     ) = build_python_dependency_graph,
-    code_impact_analyzer: CodeImpactAnalyzer = (analyze_code_impact),
+    code_impact_analyzer: CodeImpactAnalyzer = analyze_code_impact,
+    test_strategy_analyzer: TestStrategyAnalyzer = (generate_test_strategy),
     human_review_enabled: bool = False,
     checkpointer: InMemorySaver | None = None,
 ):
@@ -482,6 +560,9 @@ def build_change_analysis_graph(
 
     repository_dependency_graph_builder 根据符号索引中的
     import 记录建立确定性的模块依赖图。
+
+    test_strategy_analyzer 根据已确认需求、代码影响结果
+    和仓库证据生成结构化测试计划。
     """
 
     builder = StateGraph(ChangeAnalysisState)
@@ -523,6 +604,12 @@ def build_change_analysis_graph(
     builder.add_node(
         "analyze_code_impact",
         create_code_impact_analysis_node(code_impact_analyzer),
+    )
+
+    # 注册测试策略智能体节点。
+    builder.add_node(
+        "generate_test_strategy",
+        create_test_strategy_node(test_strategy_analyzer),
     )
 
     # 工作流入口首先清理用户输入。
@@ -601,9 +688,15 @@ def build_change_analysis_graph(
         "analyze_code_impact",
     )
 
-    # 代码影响分析完成后结束工作流。
+    # 代码影响分析完成后生成结构化测试策略。
     builder.add_edge(
         "analyze_code_impact",
+        "generate_test_strategy",
+    )
+
+    # 测试策略生成后结束工作流。
+    builder.add_edge(
+        "generate_test_strategy",
         END,
     )
 

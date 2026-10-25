@@ -8,6 +8,7 @@ from app.schemas.human_review import (
     RequirementReviewPrompt,
 )
 from app.schemas.requirement import RequirementAnalysis
+from app.schemas.test_strategy import TestStrategy
 
 
 class ChangeAnalysisRequest(BaseModel):
@@ -60,13 +61,13 @@ class ChangeAnalysisResponse(BaseModel):
     )
 
     # 工作流当前所处的阶段。
-    # 可能是等待审核、审核拒绝或代码影响分析完成。
+    # 可能是等待审核、审核拒绝或测试策略生成完成。
     status: str = Field(
         description="工作流当前状态",
         examples=[
             "awaiting_requirement_review",
             "requirement_rejected",
-            "code_impact_analyzed",
+            "test_strategy_generated",
         ],
     )
 
@@ -100,4 +101,11 @@ class ChangeAnalysisResponse(BaseModel):
     code_impact_analysis: CodeImpactAnalysis | None = Field(
         default=None,
         description="基于真实仓库生成的代码影响分析结果",
+    )
+
+    # 第三个智能体生成的测试策略。
+    # 等待审核或代码影响分析尚未完成时，该字段为 None。
+    test_strategy: TestStrategy | None = Field(
+        default=None,
+        description=("基于需求、代码影响和真实仓库证据生成的测试策略"),
     )

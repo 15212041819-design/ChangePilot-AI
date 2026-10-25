@@ -10,7 +10,8 @@
 3. 人工审核批准前不会扫描、索引或建立依赖图。
 4. 人工批准后才会建立符号索引和模块依赖图。
 5. 依赖图会作为正式证据传给代码影响智能体。
-6. 人工拒绝后会修订需求并再次等待审核。
+6. 代码影响分析会继续生成结构化测试策略。
+7. 人工拒绝后会修订需求并再次等待审核。
 """
 
 from pathlib import Path
@@ -38,6 +39,15 @@ from app.schemas.repository import (
     RepositorySnapshot,
 )
 from app.schemas.requirement import RequirementAnalysis
+from app.schemas.test_strategy import (
+    TestFilePlan as StrategyFilePlan,
+)
+from app.schemas.test_strategy import (
+    TestScenario as StrategyScenario,
+)
+from app.schemas.test_strategy import (
+    TestStrategy as StrategyResult,
+)
 
 
 def fake_requirement_analyzer(
@@ -75,13 +85,13 @@ def fake_repository_scanner(
         repository_name="order_service",
         files=[
             RepositoryFile(
-                relative_path=("order_app/service.py"),
+                relative_path="order_app/service.py",
                 language="python",
                 size_bytes=100,
                 content=("class OrderService:\n    pass\n"),
             ),
             RepositoryFile(
-                relative_path=("tests/test_service.py"),
+                relative_path="tests/test_service.py",
                 language="python",
                 size_bytes=100,
                 content=(
@@ -141,14 +151,75 @@ def fake_code_impact_analyzer(
         impacted_files=[
             ImpactedFile(
                 path="order_app/service.py",
-                reason=("订单服务缺少取消订单功能"),
-                suggested_changes=["增加 cancel_order 方法"],
+                reason="订单服务缺少取消订单功能",
+                suggested_changes=[
+                    "增加 cancel_order 方法",
+                ],
                 risk_level="medium",
             )
         ],
         new_files=[],
         test_files=["tests/test_service.py"],
         dependency_changes=[],
+    )
+
+
+def fake_test_strategy_analyzer(
+    requirement: RequirementAnalysis,
+    code_impact: CodeImpactAnalysis,
+    repository: RepositorySnapshot,
+    review: RequirementReviewDecision | None,
+    symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
+) -> StrategyResult:
+    """模拟接收完整上游证据的测试策略智能体。"""
+
+    assert "待支付订单可以取消" in requirement.acceptance_criteria
+    assert code_impact.impacted_files[0].path == "order_app/service.py"
+    assert repository.repository_name == "order_service"
+    assert symbol_index.repository_name == repository.repository_name
+    assert dependency_graph.repository_name == repository.repository_name
+
+    if requirement.assumptions:
+        assert review is not None
+        assert review.action == "approve"
+
+    return StrategyResult(
+        summary="验证订单取消功能和相关回归风险",
+        scenarios=[
+            StrategyScenario(
+                name="取消待支付订单",
+                level="unit",
+                category="happy_path",
+                priority="high",
+                target="OrderService.cancel_order",
+                description="验证待支付订单能够取消",
+                related_acceptance_criteria=[
+                    "待支付订单可以取消",
+                ],
+                preconditions=[
+                    "订单状态为 PENDING",
+                ],
+                steps=[
+                    "调用 cancel_order",
+                ],
+                expected_result=("订单状态变为 CANCELLED"),
+            )
+        ],
+        test_files=[
+            StrategyFilePlan(
+                path="tests/test_service.py",
+                action="modify",
+                reason="补充取消订单测试",
+                scenario_names=[
+                    "取消待支付订单",
+                ],
+            )
+        ],
+        coverage_gaps=[],
+        risks=[
+            "支付和取消并发需要额外验证",
+        ],
     )
 
 
@@ -160,6 +231,7 @@ def build_test_graph():
         repository_resolver=(fake_repository_resolver),
         repository_scanner=(fake_repository_scanner),
         code_impact_analyzer=(fake_code_impact_analyzer),
+        test_strategy_analyzer=(fake_test_strategy_analyzer),
     )
 
 
@@ -167,7 +239,7 @@ def create_initial_state() -> dict[str, object]:
     """创建普通工作流使用的初始状态。"""
 
     return {
-        "request_text": ("  为订单系统增加   取消功能  "),
+        "request_text": "  为订单系统增加   取消功能  ",
         "normalized_request": "",
         "repository_name": "order_service",
         "requirement_analysis": None,
@@ -176,12 +248,13 @@ def create_initial_state() -> dict[str, object]:
         "repository_symbol_index": None,
         "repository_dependency_graph": None,
         "code_impact_analysis": None,
+        "test_strategy": None,
         "status": "received",
     }
 
 
 def test_change_analysis_graph_runs_complete_workflow() -> None:
-    """工作流应该完成扫描、索引、依赖图和影响分析。"""
+    """工作流应该完成扫描、索引、影响分析和测试策略。"""
 
     graph = build_test_graph()
 
@@ -192,15 +265,17 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     repository_symbol_index = result["repository_symbol_index"]
     repository_dependency_graph = result["repository_dependency_graph"]
     code_impact_analysis = result["code_impact_analysis"]
+    test_strategy = result["test_strategy"]
 
     assert result["normalized_request"] == ("为订单系统增加 取消功能")
-    assert result["status"] == ("code_impact_analyzed")
+    assert result["status"] == ("test_strategy_generated")
 
     assert requirement_analysis is not None
     assert repository_snapshot is not None
     assert repository_symbol_index is not None
     assert repository_dependency_graph is not None
     assert code_impact_analysis is not None
+    assert test_strategy is not None
 
     assert requirement_analysis.change_type == "feature"
 
@@ -223,6 +298,8 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     }
 
     assert code_impact_analysis.impacted_files[0].path == "order_app/service.py"
+    assert test_strategy.scenarios[0].name == "取消待支付订单"
+    assert test_strategy.test_files[0].path == "tests/test_service.py"
 
 
 def test_change_analysis_graph_rejects_empty_request() -> None:
@@ -250,12 +327,20 @@ def fake_requirement_analyzer_with_assumptions(
         summary=f"分析结果：{request_text}",
         change_type="feature",
         affected_modules=["订单服务"],
-        acceptance_criteria=["待支付订单可以取消"],
-        risks=["订单状态可能发生冲突"],
+        acceptance_criteria=[
+            "待支付订单可以取消",
+        ],
+        risks=[
+            "订单状态可能发生冲突",
+        ],
         # 该内容没有在用户原始需求中明确说明，
         # 因此必须等待人工确认。
-        assumptions=["取消后的订单状态命名为 cancelled"],
-        clarification_questions=["是否确认使用 cancelled 作为取消状态值？"],
+        assumptions=[
+            "取消后的订单状态命名为 cancelled",
+        ],
+        clarification_questions=[
+            "是否确认使用 cancelled 作为取消状态值？",
+        ],
     )
 
 
@@ -280,11 +365,17 @@ def fake_requirement_revision_analyzer(
             "待支付订单可以取消",
             "取消后的订单进入明确的取消状态",
         ],
-        risks=["取消操作与支付操作可能发生状态冲突"],
+        risks=[
+            "取消操作与支付操作可能发生状态冲突",
+        ],
         # 修订后仍然保留待确认假设，
         # 因此工作流会再次暂停。
-        assumptions=["取消后的状态名称暂定为 cancelled_order"],
-        clarification_questions=["是否批准使用 cancelled_order 作为取消状态值？"],
+        assumptions=[
+            "取消后的状态名称暂定为 cancelled_order",
+        ],
+        clarification_questions=[
+            "是否批准使用 cancelled_order 作为取消状态值？",
+        ],
     )
 
 
@@ -297,6 +388,7 @@ def build_reviewable_test_graph():
         repository_resolver=(fake_repository_resolver),
         repository_scanner=(fake_repository_scanner),
         code_impact_analyzer=(fake_code_impact_analyzer),
+        test_strategy_analyzer=(fake_test_strategy_analyzer),
         human_review_enabled=True,
         # 人工中断和恢复必须使用检查点。
         checkpointer=InMemorySaver(),
@@ -316,6 +408,7 @@ def create_reviewable_initial_state() -> dict[str, object]:
         "repository_symbol_index": None,
         "repository_dependency_graph": None,
         "code_impact_analysis": None,
+        "test_strategy": None,
         "status": "received",
     }
 
@@ -345,6 +438,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert paused_result["repository_symbol_index"] is None
     assert paused_result["repository_dependency_graph"] is None
     assert paused_result["code_impact_analysis"] is None
+    assert paused_result["test_strategy"] is None
 
     interrupts = paused_result["__interrupt__"]
 
@@ -371,7 +465,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     symbol_index = completed_result["repository_symbol_index"]
     dependency_graph = completed_result["repository_dependency_graph"]
 
-    assert completed_result["status"] == ("code_impact_analyzed")
+    assert completed_result["status"] == ("test_strategy_generated")
     assert review_decision is not None
     assert review_decision.action == "approve"
 
@@ -382,6 +476,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None
+    assert completed_result["test_strategy"] is not None
 
 
 def test_change_analysis_graph_revises_after_review_rejection() -> None:
@@ -426,6 +521,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     assert second_paused_result["repository_symbol_index"] is None
     assert second_paused_result["repository_dependency_graph"] is None
     assert second_paused_result["code_impact_analysis"] is None
+    assert second_paused_result["test_strategy"] is None
 
     revised_analysis = second_paused_result["requirement_analysis"]
 
@@ -459,7 +555,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     symbol_index = completed_result["repository_symbol_index"]
     dependency_graph = completed_result["repository_dependency_graph"]
 
-    assert completed_result["status"] == ("code_impact_analyzed")
+    assert completed_result["status"] == ("test_strategy_generated")
     assert review_decision is not None
     assert review_decision.action == "approve"
 
@@ -470,3 +566,4 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None
+    assert completed_result["test_strategy"] is not None

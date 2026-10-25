@@ -19,6 +19,10 @@ from app.schemas.human_review import (
     RequirementReviewPrompt,
 )
 from app.schemas.requirement import RequirementAnalysis
+from app.schemas.test_strategy import TestStrategy
+from app.services.test_strategy_agent import (
+    TestStrategyValidationError,
+)
 from app.tools.code_impact_validator import (
     CodeImpactValidationError,
 )
@@ -86,7 +90,7 @@ def extract_review_prompt(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("工作流返回了无效的需求审核提示。"),
+            detail="工作流返回了无效的需求审核提示。",
         ) from exc
 
 
@@ -102,7 +106,7 @@ def build_change_analysis_response(
     if not isinstance(normalized_request, str):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("工作流没有生成有效的规范化需求。"),
+            detail="工作流没有生成有效的规范化需求。",
         )
 
     if not isinstance(workflow_status, str):
@@ -120,7 +124,7 @@ def build_change_analysis_response(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("工作流没有生成有效的需求分析结果。"),
+            detail="工作流没有生成有效的需求分析结果。",
         ) from exc
 
     raw_review = result.get("requirement_review")
@@ -132,8 +136,8 @@ def build_change_analysis_response(
             requirement_review = RequirementReviewDecision.model_validate(raw_review)
         except ValueError as exc:
             raise HTTPException(
-                status_code=(status.HTTP_502_BAD_GATEWAY),
-                detail=("工作流返回了无效的需求审核决定。"),
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="工作流返回了无效的需求审核决定。",
             ) from exc
 
     raw_code_impact = result.get("code_impact_analysis")
@@ -145,8 +149,21 @@ def build_change_analysis_response(
             code_impact_analysis = CodeImpactAnalysis.model_validate(raw_code_impact)
         except ValueError as exc:
             raise HTTPException(
-                status_code=(status.HTTP_502_BAD_GATEWAY),
-                detail=("工作流返回了无效的代码影响分析结果。"),
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="工作流返回了无效的代码影响分析结果。",
+            ) from exc
+
+    raw_test_strategy = result.get("test_strategy")
+
+    if raw_test_strategy is None:
+        test_strategy = None
+    else:
+        try:
+            test_strategy = TestStrategy.model_validate(raw_test_strategy)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="工作流返回了无效的测试策略。",
             ) from exc
 
     # 工作流发生中断时，
@@ -161,12 +178,18 @@ def build_change_analysis_response(
         "awaiting_requirement_review" if review_prompt is not None else workflow_status
     )
 
-    # 工作流声称已经完成代码影响分析时，
-    # 结果不能为空。
-    if response_status == "code_impact_analyzed" and code_impact_analysis is None:
+    # 工作流声称已经完成测试策略时，
+    # 代码影响分析和测试策略都不能为空。
+    if response_status == "test_strategy_generated" and code_impact_analysis is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("工作流没有生成有效的代码影响分析结果。"),
+            detail="工作流没有生成有效的代码影响分析结果。",
+        )
+
+    if response_status == "test_strategy_generated" and test_strategy is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="工作流没有生成有效的测试策略。",
         )
 
     return ChangeAnalysisResponse(
@@ -177,6 +200,7 @@ def build_change_analysis_response(
         review_prompt=review_prompt,
         requirement_review=requirement_review,
         code_impact_analysis=code_impact_analysis,
+        test_strategy=test_strategy,
     )
 
 
@@ -213,9 +237,9 @@ def analyze_change(
     try:
         result = graph.invoke(
             {
-                "request_text": (request.request_text),
+                "request_text": request.request_text,
                 "normalized_request": "",
-                "repository_name": (request.repository_name),
+                "repository_name": request.repository_name,
                 "requirement_analysis": None,
                 "requirement_review": None,
                 "repository_snapshot": None,
@@ -226,15 +250,20 @@ def analyze_change(
                 # 由工作流节点写入。
                 "repository_dependency_graph": None,
                 "code_impact_analysis": None,
+                # 测试策略会在代码影响分析完成后生成。
+                "test_strategy": None,
                 "status": "received",
             },
             config=config,
         )
-    except CodeImpactValidationError as exc:
+    except (
+        CodeImpactValidationError,
+        TestStrategyValidationError,
+    ) as exc:
         # 模型已经返回结构化数据，
         # 但文件路径没有通过真实仓库校验。
         raise HTTPException(
-            status_code=(status.HTTP_502_BAD_GATEWAY),
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
     except WorkspacePathError as exc:
@@ -244,7 +273,7 @@ def analyze_change(
         ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=(status.HTTP_404_NOT_FOUND),
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
 
@@ -257,7 +286,7 @@ def analyze_change(
 @router.post(
     "/analyze/resume",
     response_model=ChangeAnalysisResponse,
-    summary=("提交人工审核决定并恢复软件变更分析"),
+    summary="提交人工审核决定并恢复软件变更分析",
 )
 def resume_change_analysis(
     request: ChangeAnalysisResumeRequest,
@@ -276,7 +305,7 @@ def resume_change_analysis(
 
     if not snapshot.values:
         raise HTTPException(
-            status_code=(status.HTTP_404_NOT_FOUND),
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="没有找到指定的工作流。",
         )
 
@@ -286,8 +315,8 @@ def resume_change_analysis(
 
     if not has_pending_interrupt:
         raise HTTPException(
-            status_code=(status.HTTP_409_CONFLICT),
-            detail=("该工作流当前不需要人工审核。"),
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该工作流当前不需要人工审核。",
         )
 
     try:
@@ -295,15 +324,18 @@ def resume_change_analysis(
         # 中 interrupt() 函数的返回值。
         result = graph.invoke(
             Command(
-                resume=(request.decision.model_dump(mode="json")),
+                resume=request.decision.model_dump(mode="json"),
             ),
             config=config,
         )
-    except CodeImpactValidationError as exc:
-        # 人工审核恢复后执行代码影响分析时，
+    except (
+        CodeImpactValidationError,
+        TestStrategyValidationError,
+    ) as exc:
+        # 人工审核恢复后执行代码影响分析或测试策略时，
         # 仍然必须拦截模型返回的不可信文件路径。
         raise HTTPException(
-            status_code=(status.HTTP_502_BAD_GATEWAY),
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
     except WorkspacePathError as exc:
@@ -313,7 +345,7 @@ def resume_change_analysis(
         ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=(status.HTTP_404_NOT_FOUND),
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
 
