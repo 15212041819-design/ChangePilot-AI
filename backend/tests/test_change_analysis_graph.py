@@ -4,11 +4,13 @@
 
 重点验证：
 
-1. 普通工作流能够完成需求分析、仓库扫描、符号索引和影响分析。
+1. 普通工作流能够完成需求分析、仓库扫描、符号索引、
+   依赖图和影响分析。
 2. 空需求会在调用智能体前被拒绝。
-3. 人工审核批准前不会扫描或索引仓库。
-4. 人工批准后才会建立符号索引并分析代码影响。
-5. 人工拒绝后会修订需求并再次等待审核。
+3. 人工审核批准前不会扫描、索引或建立依赖图。
+4. 人工批准后才会建立符号索引和模块依赖图。
+5. 依赖图会作为正式证据传给代码影响智能体。
+6. 人工拒绝后会修订需求并再次等待审核。
 """
 
 from pathlib import Path
@@ -25,6 +27,9 @@ from app.schemas.code_impact import (
     ImpactedFile,
 )
 from app.schemas.code_index import RepositorySymbolIndex
+from app.schemas.dependency_graph import (
+    RepositoryDependencyGraph,
+)
 from app.schemas.human_review import (
     RequirementReviewDecision,
 )
@@ -79,7 +84,12 @@ def fake_repository_scanner(
                 relative_path=("tests/test_service.py"),
                 language="python",
                 size_bytes=100,
-                content=("def test_create_order():\n    pass\n"),
+                content=(
+                    "from order_app.service "
+                    "import OrderService\n\n"
+                    "def test_create_order():\n"
+                    "    pass\n"
+                ),
             ),
         ],
         scanned_file_count=2,
@@ -92,17 +102,32 @@ def fake_code_impact_analyzer(
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
     symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
 ) -> CodeImpactAnalysis:
-    """模拟接收仓库快照与符号索引的代码影响分析智能体。"""
+    """模拟接收符号索引与依赖图的影响分析智能体。"""
 
     assert requirement.change_type == "feature"
     assert repository.repository_name == "order_service"
 
     # 验证工作流不是只建立索引，
-    # 而是确实把索引传给了代码影响分析智能体。
+    # 而是确实把索引传给代码影响分析智能体。
     assert symbol_index.repository_name == repository.repository_name
     assert symbol_index.symbol_count == 2
     assert symbol_index.parse_error_count == 0
+    assert symbol_index.import_count == 1
+
+    # 验证工作流已经根据 import 记录建立依赖图，
+    # 并把依赖图作为第五个参数交给影响分析智能体。
+    assert dependency_graph.repository_name == repository.repository_name
+    assert dependency_graph.internal_dependency_count == 1
+    assert dependency_graph.external_dependency_count == 0
+    assert dependency_graph.unresolved_internal_dependency_count == 0
+
+    dependency = dependency_graph.dependencies[0]
+
+    assert dependency.source_module == "tests.test_service"
+    assert dependency.target_module == "order_app.service"
+    assert dependency.target_file == "order_app/service.py"
 
     # 当需求中包含假设时，
     # 必须先得到人工批准才能进入本节点。
@@ -149,13 +174,14 @@ def create_initial_state() -> dict[str, object]:
         "requirement_review": None,
         "repository_snapshot": None,
         "repository_symbol_index": None,
+        "repository_dependency_graph": None,
         "code_impact_analysis": None,
         "status": "received",
     }
 
 
 def test_change_analysis_graph_runs_complete_workflow() -> None:
-    """工作流应该完成扫描、索引和影响分析。"""
+    """工作流应该完成扫描、索引、依赖图和影响分析。"""
 
     graph = build_test_graph()
 
@@ -164,6 +190,7 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     requirement_analysis = result["requirement_analysis"]
     repository_snapshot = result["repository_snapshot"]
     repository_symbol_index = result["repository_symbol_index"]
+    repository_dependency_graph = result["repository_dependency_graph"]
     code_impact_analysis = result["code_impact_analysis"]
 
     assert result["normalized_request"] == ("为订单系统增加 取消功能")
@@ -172,6 +199,7 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     assert requirement_analysis is not None
     assert repository_snapshot is not None
     assert repository_symbol_index is not None
+    assert repository_dependency_graph is not None
     assert code_impact_analysis is not None
 
     assert requirement_analysis.change_type == "feature"
@@ -179,8 +207,13 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     # 假仓库包含一个类和一个测试函数，
     # 因此符号索引总数应该为 2。
     assert repository_symbol_index.symbol_count == 2
-    assert repository_symbol_index.import_count == 0
+    assert repository_symbol_index.import_count == 1
     assert repository_symbol_index.parse_error_count == 0
+
+    # 测试文件导入订单服务，
+    # 因此应该生成一条仓库内部依赖边。
+    assert repository_dependency_graph.internal_dependency_count == 1
+    assert len(repository_dependency_graph.modules) == 2
 
     indexed_file_paths = {indexed_file.file_path for indexed_file in repository_symbol_index.files}
 
@@ -281,13 +314,14 @@ def create_reviewable_initial_state() -> dict[str, object]:
         "requirement_review": None,
         "repository_snapshot": None,
         "repository_symbol_index": None,
+        "repository_dependency_graph": None,
         "code_impact_analysis": None,
         "status": "received",
     }
 
 
 def test_change_analysis_graph_continues_after_review_approval() -> None:
-    """人工批准后才应该扫描、索引并分析代码。"""
+    """人工批准后才应该扫描、索引和建立依赖图。"""
 
     graph = build_reviewable_test_graph()
 
@@ -306,9 +340,10 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert paused_result["status"] == ("requirement_analyzed")
     assert paused_result["requirement_analysis"] is not None
 
-    # 人工批准前不能读取或索引代码仓库。
+    # 人工批准前不能读取、索引或分析代码仓库。
     assert paused_result["repository_snapshot"] is None
     assert paused_result["repository_symbol_index"] is None
+    assert paused_result["repository_dependency_graph"] is None
     assert paused_result["code_impact_analysis"] is None
 
     interrupts = paused_result["__interrupt__"]
@@ -334,6 +369,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
 
     review_decision = completed_result["requirement_review"]
     symbol_index = completed_result["repository_symbol_index"]
+    dependency_graph = completed_result["repository_dependency_graph"]
 
     assert completed_result["status"] == ("code_impact_analyzed")
     assert review_decision is not None
@@ -342,6 +378,8 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert completed_result["repository_snapshot"] is not None
     assert symbol_index is not None
     assert symbol_index.symbol_count == 2
+    assert dependency_graph is not None
+    assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None
 
@@ -383,9 +421,10 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     # 旧审核结果已经清除。
     assert second_paused_result["requirement_review"] is None
 
-    # 第二次批准前仍然不能扫描或索引仓库。
+    # 第二次批准前仍然不能扫描、索引或建立依赖图。
     assert second_paused_result["repository_snapshot"] is None
     assert second_paused_result["repository_symbol_index"] is None
+    assert second_paused_result["repository_dependency_graph"] is None
     assert second_paused_result["code_impact_analysis"] is None
 
     revised_analysis = second_paused_result["requirement_analysis"]
@@ -418,6 +457,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
 
     review_decision = completed_result["requirement_review"]
     symbol_index = completed_result["repository_symbol_index"]
+    dependency_graph = completed_result["repository_dependency_graph"]
 
     assert completed_result["status"] == ("code_impact_analyzed")
     assert review_decision is not None
@@ -426,5 +466,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     assert completed_result["repository_snapshot"] is not None
     assert symbol_index is not None
     assert symbol_index.symbol_count == 2
+    assert dependency_graph is not None
+    assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None

@@ -59,13 +59,20 @@ def extract_review_prompt(
 
     # 不同 LangGraph 执行方式可能使用列表或元组保存中断对象。
     # 没有中断，或者数据类型不正确时，说明工作流没有暂停。
-    if not isinstance(raw_interrupts, (list, tuple)) or not raw_interrupts:
+    if (
+        not isinstance(
+            raw_interrupts,
+            (list, tuple),
+        )
+        or not raw_interrupts
+    ):
         return None
 
     # 当前工作流一次只会产生一个需求审核中断。
     first_interrupt = raw_interrupts[0]
 
-    # Interrupt 对象的 value 属性保存传给 interrupt() 的载荷。
+    # Interrupt 对象的 value 属性保存
+    # 传给 interrupt() 的载荷。
     interrupt_value = getattr(
         first_interrupt,
         "value",
@@ -79,7 +86,7 @@ def extract_review_prompt(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="工作流返回了无效的需求审核提示。",
+            detail=("工作流返回了无效的需求审核提示。"),
         ) from exc
 
 
@@ -95,7 +102,7 @@ def build_change_analysis_response(
     if not isinstance(normalized_request, str):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="工作流没有生成有效的规范化需求。",
+            detail=("工作流没有生成有效的规范化需求。"),
         )
 
     if not isinstance(workflow_status, str):
@@ -105,14 +112,15 @@ def build_change_analysis_response(
         )
 
     try:
-        # model_validate 同时兼容 Pydantic 对象和普通字典。
+        # model_validate 同时兼容 Pydantic
+        # 对象和普通字典。
         requirement_analysis = RequirementAnalysis.model_validate(
             result.get("requirement_analysis")
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="工作流没有生成有效的需求分析结果。",
+            detail=("工作流没有生成有效的需求分析结果。"),
         ) from exc
 
     raw_review = result.get("requirement_review")
@@ -124,8 +132,8 @@ def build_change_analysis_response(
             requirement_review = RequirementReviewDecision.model_validate(raw_review)
         except ValueError as exc:
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="工作流返回了无效的需求审核决定。",
+                status_code=(status.HTTP_502_BAD_GATEWAY),
+                detail=("工作流返回了无效的需求审核决定。"),
             ) from exc
 
     raw_code_impact = result.get("code_impact_analysis")
@@ -137,25 +145,28 @@ def build_change_analysis_response(
             code_impact_analysis = CodeImpactAnalysis.model_validate(raw_code_impact)
         except ValueError as exc:
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="工作流返回了无效的代码影响分析结果。",
+                status_code=(status.HTTP_502_BAD_GATEWAY),
+                detail=("工作流返回了无效的代码影响分析结果。"),
             ) from exc
 
-    # 工作流发生中断时，从 __interrupt__ 中读取待审核内容。
+    # 工作流发生中断时，
+    # 从 __interrupt__ 中读取待审核内容。
     review_prompt = extract_review_prompt(result)
 
-    # 图内部状态可能停留在 requirement_analyzed
-    # 或 requirement_revised。
-    # API 使用更明确的状态告诉客户端当前正在等待人工审核。
+    # 图内部状态可能停留在
+    # requirement_analyzed 或 requirement_revised。
+    # API 使用更明确的状态告诉客户端
+    # 当前正在等待人工审核。
     response_status = (
         "awaiting_requirement_review" if review_prompt is not None else workflow_status
     )
 
-    # 工作流声称已经完成代码影响分析时，结果不能为空。
+    # 工作流声称已经完成代码影响分析时，
+    # 结果不能为空。
     if response_status == "code_impact_analyzed" and code_impact_analysis is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="工作流没有生成有效的代码影响分析结果。",
+            detail=("工作流没有生成有效的代码影响分析结果。"),
         )
 
     return ChangeAnalysisResponse(
@@ -185,13 +196,13 @@ def analyze_change(
 
     if not request.request_text.strip():
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=(status.HTTP_422_UNPROCESSABLE_CONTENT),
             detail="变更需求不能为空。",
         )
 
     if not request.repository_name.strip():
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=(status.HTTP_422_UNPROCESSABLE_CONTENT),
             detail="代码仓库名称不能为空。",
         )
 
@@ -202,14 +213,18 @@ def analyze_change(
     try:
         result = graph.invoke(
             {
-                "request_text": request.request_text,
+                "request_text": (request.request_text),
                 "normalized_request": "",
-                "repository_name": request.repository_name,
+                "repository_name": (request.repository_name),
                 "requirement_analysis": None,
                 "requirement_review": None,
                 "repository_snapshot": None,
-                # 符号索引将在仓库扫描完成后由工作流节点写入。
+                # 符号索引将在仓库扫描完成后
+                # 由工作流节点写入。
                 "repository_symbol_index": None,
+                # 依赖图将在符号索引完成后
+                # 由工作流节点写入。
+                "repository_dependency_graph": None,
                 "code_impact_analysis": None,
                 "status": "received",
             },
@@ -219,17 +234,17 @@ def analyze_change(
         # 模型已经返回结构化数据，
         # 但文件路径没有通过真实仓库校验。
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            status_code=(status.HTTP_502_BAD_GATEWAY),
             detail=str(exc),
         ) from exc
     except WorkspacePathError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=(status.HTTP_422_UNPROCESSABLE_CONTENT),
             detail=str(exc),
         ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(status.HTTP_404_NOT_FOUND),
             detail=str(exc),
         ) from exc
 
@@ -242,7 +257,7 @@ def analyze_change(
 @router.post(
     "/analyze/resume",
     response_model=ChangeAnalysisResponse,
-    summary="提交人工审核决定并恢复软件变更分析",
+    summary=("提交人工审核决定并恢复软件变更分析"),
 )
 def resume_change_analysis(
     request: ChangeAnalysisResumeRequest,
@@ -261,7 +276,7 @@ def resume_change_analysis(
 
     if not snapshot.values:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(status.HTTP_404_NOT_FOUND),
             detail="没有找到指定的工作流。",
         )
 
@@ -271,16 +286,16 @@ def resume_change_analysis(
 
     if not has_pending_interrupt:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="该工作流当前不需要人工审核。",
+            status_code=(status.HTTP_409_CONFLICT),
+            detail=("该工作流当前不需要人工审核。"),
         )
 
     try:
-        # decision 会成为 review_requirement() 中
-        # interrupt() 函数的返回值。
+        # decision 会成为 review_requirement()
+        # 中 interrupt() 函数的返回值。
         result = graph.invoke(
             Command(
-                resume=request.decision.model_dump(mode="json"),
+                resume=(request.decision.model_dump(mode="json")),
             ),
             config=config,
         )
@@ -288,17 +303,17 @@ def resume_change_analysis(
         # 人工审核恢复后执行代码影响分析时，
         # 仍然必须拦截模型返回的不可信文件路径。
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            status_code=(status.HTTP_502_BAD_GATEWAY),
             detail=str(exc),
         ) from exc
     except WorkspacePathError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=(status.HTTP_422_UNPROCESSABLE_CONTENT),
             detail=str(exc),
         ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(status.HTTP_404_NOT_FOUND),
             detail=str(exc),
         ) from exc
 

@@ -6,15 +6,24 @@ from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
-from app.api.routes.changes import get_change_analysis_graph
-from app.graph.change_analysis import build_change_analysis_graph
+from app.api.routes.changes import (
+    get_change_analysis_graph,
+)
+from app.graph.change_analysis import (
+    build_change_analysis_graph,
+)
 from app.main import app
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
 )
 from app.schemas.code_index import RepositorySymbolIndex
-from app.schemas.human_review import RequirementReviewDecision
+from app.schemas.dependency_graph import (
+    RepositoryDependencyGraph,
+)
+from app.schemas.human_review import (
+    RequirementReviewDecision,
+)
 from app.schemas.repository import (
     RepositoryFile,
     RepositorySnapshot,
@@ -53,19 +62,21 @@ def fake_repository_scanner(
     """模拟仓库扫描结果。"""
 
     return RepositorySnapshot(
-        repository_name=Path(repository_path).name,
+        repository_name=(Path(repository_path).name),
         files=[
             RepositoryFile(
-                relative_path="order_app/service.py",
+                relative_path=("order_app/service.py"),
                 language="python",
                 size_bytes=100,
-                content="class OrderService: ...\n",
+                content=("class OrderService: ...\n"),
             ),
             RepositoryFile(
-                relative_path="tests/test_service.py",
+                relative_path=("tests/test_service.py"),
                 language="python",
                 size_bytes=100,
-                content="def test_create_order(): ...\n",
+                content=(
+                    "from order_app.service import OrderService\n\ndef test_create_order(): ...\n"
+                ),
             ),
         ],
         scanned_file_count=2,
@@ -78,13 +89,25 @@ def fake_code_impact_analyzer(
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
     symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
 ) -> CodeImpactAnalysis:
-    """模拟接收审核结果和符号索引的代码影响分析智能体。"""
+    """模拟接收审核结果、符号索引和依赖图的影响分析智能体。"""
 
     # API 工作流必须把当前仓库对应的索引传入智能体。
     assert symbol_index.repository_name == repository.repository_name
     assert symbol_index.symbol_count == 2
     assert symbol_index.parse_error_count == 0
+    assert symbol_index.import_count == 1
+
+    # API 工作流必须建立并传递当前仓库的依赖图。
+    assert dependency_graph.repository_name == repository.repository_name
+    assert dependency_graph.internal_dependency_count == 1
+
+    dependency = dependency_graph.dependencies[0]
+
+    assert dependency.source_module == "tests.test_service"
+    assert dependency.target_module == "order_app.service"
+    assert dependency.target_file == "order_app/service.py"
 
     # 人工审核模式下，
     # 包含假设的需求只能在批准后执行。
@@ -114,15 +137,19 @@ def fake_invalid_code_impact_analyzer(
     repository: RepositorySnapshot,
     review: RequirementReviewDecision | None,
     symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
 ) -> CodeImpactAnalysis:
     """模拟代码影响分析结果没有通过真实性校验。"""
 
-    # 确认工作流已经完成需求分析和仓库扫描。
+    # 确认工作流已经完成需求分析、
+    # 仓库扫描、符号索引和依赖图构建。
     assert requirement.change_type == "feature"
     assert repository.repository_name == "order_service"
     assert review is None
     assert symbol_index.repository_name == repository.repository_name
     assert symbol_index.symbol_count == 2
+    assert dependency_graph.repository_name == repository.repository_name
+    assert dependency_graph.internal_dependency_count == 1
 
     raise CodeImpactValidationError("impacted_files 包含仓库中不存在的文件：order_app/missing.py")
 
@@ -131,10 +158,10 @@ def get_test_change_analysis_graph() -> CompiledStateGraph:
     """创建不启用人工审核的 API 测试工作流。"""
 
     return build_change_analysis_graph(
-        requirement_analyzer=fake_requirement_analyzer,
-        repository_resolver=fake_repository_resolver,
-        repository_scanner=fake_repository_scanner,
-        code_impact_analyzer=fake_code_impact_analyzer,
+        requirement_analyzer=(fake_requirement_analyzer),
+        repository_resolver=(fake_repository_resolver),
+        repository_scanner=(fake_repository_scanner),
+        code_impact_analyzer=(fake_code_impact_analyzer),
     )
 
 
@@ -150,7 +177,7 @@ def test_analyze_change_endpoint() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": ("  为订单系统增加   取消功能  "),
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
@@ -158,8 +185,8 @@ def test_analyze_change_endpoint() -> None:
 
         response_body = response.json()
 
-        assert response_body["status"] == "code_impact_analyzed"
-        assert response_body["normalized_request"] == ("为订单系统增加 取消功能")
+        assert response_body["status"] == ("code_impact_analyzed")
+        assert response_body["normalized_request"] == "为订单系统增加 取消功能"
         assert response_body["requirement_analysis"]["change_type"] == "feature"
         assert (
             response_body["code_impact_analysis"]["impacted_files"][0]["path"]
@@ -184,12 +211,12 @@ def test_analyze_change_endpoint_rejects_blank_request() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": "   ",
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
         assert response.status_code == 422
-        assert response.json()["detail"] == "变更需求不能为空。"
+        assert response.json()["detail"] == ("变更需求不能为空。")
     finally:
         app.dependency_overrides.pop(
             get_change_analysis_graph,
@@ -204,9 +231,9 @@ def test_analyze_change_endpoint_rejects_untrusted_impact_result() -> None:
         """创建会产生真实性校验错误的测试工作流。"""
 
         return build_change_analysis_graph(
-            requirement_analyzer=fake_requirement_analyzer,
-            repository_resolver=fake_repository_resolver,
-            repository_scanner=fake_repository_scanner,
+            requirement_analyzer=(fake_requirement_analyzer),
+            repository_resolver=(fake_repository_resolver),
+            repository_scanner=(fake_repository_scanner),
             code_impact_analyzer=(fake_invalid_code_impact_analyzer),
         )
 
@@ -219,7 +246,7 @@ def test_analyze_change_endpoint_rejects_untrusted_impact_result() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": ("为订单系统增加取消订单功能"),
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
@@ -247,7 +274,7 @@ def fake_requirement_analyzer_with_assumptions(
         risks=["订单状态可能发生冲突"],
         # 该假设会触发正式工作流中的人工审核节点。
         assumptions=["取消后的订单状态命名为 cancelled"],
-        # API 会把该问题包含在 review_prompt 中返回给客户端。
+        # API 会把该问题包含在 review_prompt 中返回。
         clarification_questions=["是否确认使用 cancelled 作为取消状态值？"],
     )
 
@@ -260,13 +287,13 @@ def fake_requirement_revision_analyzer(
     """模拟根据人工拒绝反馈重新分析需求。"""
 
     # 确认 API 工作流把原始需求正确传给修订智能体。
-    assert request_text == "为订单系统增加取消订单功能"
+    assert request_text == ("为订单系统增加取消订单功能")
 
     # 确认修订智能体收到的是上一版需求分析。
     assert previous_analysis.assumptions == ["取消后的订单状态命名为 cancelled"]
 
     # 确认用户提交的拒绝反馈没有在 API 层丢失。
-    assert review_feedback == "状态名称需要重新讨论。"
+    assert review_feedback == ("状态名称需要重新讨论。")
 
     return RequirementAnalysis(
         summary=("为订单系统增加取消订单功能，并重新确认取消状态名称。"),
@@ -278,7 +305,7 @@ def fake_requirement_revision_analyzer(
         ],
         risks=["取消操作与支付操作可能发生状态冲突"],
         # 修订后仍然包含待确认假设，
-        # 因此 API 应再次返回 awaiting_requirement_review。
+        # 因此 API 应再次返回待审核状态。
         assumptions=["取消后的状态名称暂定为 cancelled_order"],
         clarification_questions=["是否批准使用 cancelled_order 作为取消状态值？"],
     )
@@ -292,9 +319,9 @@ def build_reviewable_api_graph() -> CompiledStateGraph:
         # 使用假的需求修订智能体，
         # 避免 API 测试调用真实 DeepSeek。
         requirement_revision_analyzer=(fake_requirement_revision_analyzer),
-        repository_resolver=fake_repository_resolver,
-        repository_scanner=fake_repository_scanner,
-        code_impact_analyzer=fake_code_impact_analyzer,
+        repository_resolver=(fake_repository_resolver),
+        repository_scanner=(fake_repository_scanner),
+        code_impact_analyzer=(fake_code_impact_analyzer),
         # 启用正式需求人工审核节点。
         human_review_enabled=True,
         # 同一个图实例必须保留检查点，
@@ -322,7 +349,7 @@ def test_analyze_change_endpoint_pauses_for_requirement_review() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": ("为订单系统增加取消订单功能"),
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
@@ -330,7 +357,7 @@ def test_analyze_change_endpoint_pauses_for_requirement_review() -> None:
 
         response_body = response.json()
 
-        # 服务端应该生成可用于恢复工作流的 thread_id。
+        # 服务端应该生成可恢复工作流的 thread_id。
         assert isinstance(
             response_body["thread_id"],
             str,
@@ -342,8 +369,8 @@ def test_analyze_change_endpoint_pauses_for_requirement_review() -> None:
         assert response_body["code_impact_analysis"] is None
         assert response_body["requirement_review"] is None
 
-        # 中断载荷应该包含智能体提出的假设和澄清问题。
-        assert response_body["review_prompt"]["type"] == ("requirement_review")
+        # 中断载荷应该包含假设和澄清问题。
+        assert response_body["review_prompt"]["type"] == "requirement_review"
         assert response_body["review_prompt"]["assumptions"] == ["取消后的订单状态命名为 cancelled"]
         assert response_body["review_prompt"]["clarification_questions"] == [
             "是否确认使用 cancelled 作为取消状态值？"
@@ -375,7 +402,7 @@ def test_resume_change_analysis_endpoint_approves_workflow() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": ("为订单系统增加取消订单功能"),
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
@@ -383,7 +410,7 @@ def test_resume_change_analysis_endpoint_approves_workflow() -> None:
 
         thread_id = analyze_response.json()["thread_id"]
 
-        # 使用首次响应中的 thread_id 批准并恢复工作流。
+        # 使用首次响应中的 thread_id 批准并恢复。
         resume_response = client.post(
             "/api/v1/changes/analyze/resume",
             json={
@@ -402,7 +429,7 @@ def test_resume_change_analysis_endpoint_approves_workflow() -> None:
         # 恢复前后必须属于同一个工作流。
         assert response_body["thread_id"] == thread_id
 
-        # 批准后应该继续扫描仓库并生成代码影响分析。
+        # 批准后应该继续扫描仓库并完成分析。
         assert response_body["status"] == ("code_impact_analyzed")
         assert response_body["review_prompt"] is None
         assert response_body["requirement_review"]["action"] == "approve"
@@ -438,7 +465,7 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
             "/api/v1/changes/analyze",
             json={
                 "request_text": ("为订单系统增加取消订单功能"),
-                "repository_name": "order_service",
+                "repository_name": ("order_service"),
             },
         )
 
@@ -446,14 +473,14 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
 
         thread_id = analyze_response.json()["thread_id"]
 
-        # 拒绝第一版需求分析，并提交具体修改意见。
+        # 拒绝第一版需求分析并提交修改意见。
         revision_response = client.post(
             "/api/v1/changes/analyze/resume",
             json={
                 "thread_id": thread_id,
                 "decision": {
                     "action": "reject",
-                    "feedback": "状态名称需要重新讨论。",
+                    "feedback": ("状态名称需要重新讨论。"),
                 },
             },
         )
@@ -462,13 +489,11 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
 
         revision_body = revision_response.json()
 
-        # 拒绝后工作流不会结束，
-        # 而是修订需求并再次进入待审核状态。
+        # 拒绝后工作流会修订需求并再次待审核。
         assert revision_body["thread_id"] == thread_id
         assert revision_body["status"] == ("awaiting_requirement_review")
 
-        # 修订节点会清除上一轮拒绝决定，
-        # 等待用户对新版本重新作出审核决定。
+        # 修订节点会清除上一轮拒绝决定。
         assert revision_body["requirement_review"] is None
         assert revision_body["code_impact_analysis"] is None
 
@@ -480,7 +505,7 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
             "取消后的状态名称暂定为 cancelled_order"
         ]
 
-        # 新的 review_prompt 应来自修订后的需求分析。
+        # 新的审核提示应来自修订后的分析。
         assert revision_body["review_prompt"]["assumptions"] == [
             "取消后的状态名称暂定为 cancelled_order"
         ]
@@ -488,7 +513,7 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
             "是否批准使用 cancelled_order 作为取消状态值？"
         ]
 
-        # 再次使用同一个 thread_id 批准修订后的需求。
+        # 再次使用同一个 thread_id 批准修订需求。
         approval_response = client.post(
             "/api/v1/changes/analyze/resume",
             json={
@@ -504,8 +529,7 @@ def test_resume_change_analysis_endpoint_revises_workflow() -> None:
 
         approval_body = approval_response.json()
 
-        # 第二次审核批准后，
-        # 工作流才会完成代码影响分析。
+        # 第二次审核批准后才会完成代码影响分析。
         assert approval_body["thread_id"] == thread_id
         assert approval_body["status"] == ("code_impact_analyzed")
         assert approval_body["review_prompt"] is None
@@ -536,7 +560,7 @@ def test_resume_change_analysis_endpoint_rejects_unknown_thread() -> None:
         response = client.post(
             "/api/v1/changes/analyze/resume",
             json={
-                "thread_id": "unknown-workflow-thread",
+                "thread_id": ("unknown-workflow-thread"),
                 "decision": {
                     "action": "approve",
                     "feedback": None,

@@ -9,11 +9,13 @@
 3. 根据需求假设决定是否暂停并等待人工审核。
 4. 安全扫描真实代码仓库。
 5. 使用 Python AST 为仓库建立结构化符号索引。
-6. 使用代码影响智能体分析需要修改的文件。
-7. 结束工作流并返回统一结果。
+6. 根据 Python 导入关系建立模块依赖图。
+7. 使用代码影响智能体分析需要修改的文件。
+8. 结束工作流并返回统一结果。
 
-符号索引会保存在 LangGraph 状态中，
-并作为代码影响智能体的正式输入，帮助模型定位真实代码符号。
+符号索引和依赖图都会保存在 LangGraph 状态中，
+并作为代码影响智能体的正式输入，
+帮助模型定位真实代码符号和模块影响传播关系。
 """
 
 from collections.abc import Callable
@@ -26,6 +28,7 @@ from langgraph.types import interrupt
 
 from app.schemas.code_impact import CodeImpactAnalysis
 from app.schemas.code_index import RepositorySymbolIndex
+from app.schemas.dependency_graph import RepositoryDependencyGraph
 from app.schemas.human_review import (
     RequirementReviewDecision,
     RequirementReviewPrompt,
@@ -36,6 +39,9 @@ from app.services.code_impact_agent import analyze_code_impact
 from app.services.requirement_agent import (
     analyze_requirement,
     revise_requirement,
+)
+from app.tools.python_dependency_graph import (
+    build_python_dependency_graph,
 )
 from app.tools.python_symbol_indexer import (
     index_python_symbols,
@@ -69,6 +75,10 @@ class ChangeAnalysisState(TypedDict):
     # Python 符号索引节点生成的结构化代码索引。
     # 仓库尚未扫描或索引时为 None。
     repository_symbol_index: RepositorySymbolIndex | None
+
+    # Python 依赖图节点生成的模块导入关系。
+    # 符号索引尚未生成或依赖图尚未构建时为 None。
+    repository_dependency_graph: RepositoryDependencyGraph | None
 
     # 代码影响智能体生成的代码影响分析。
     code_impact_analysis: CodeImpactAnalysis | None
@@ -114,14 +124,22 @@ RepositorySymbolIndexer = Callable[
     RepositorySymbolIndex,
 ]
 
+# 依赖图构建器接收符号索引，
+# 返回仓库内模块、内部依赖、外部依赖和未解析依赖。
+RepositoryDependencyGraphBuilder = Callable[
+    [RepositorySymbolIndex],
+    RepositoryDependencyGraph,
+]
+
 # 代码影响智能体接收需求分析、仓库快照、
-# 人工审核结果和确定性的 Python 符号索引。
+# 人工审核结果、Python 符号索引和模块依赖图。
 CodeImpactAnalyzer = Callable[
     [
         RequirementAnalysis,
         RepositorySnapshot,
         RequirementReviewDecision | None,
         RepositorySymbolIndex,
+        RepositoryDependencyGraph,
     ],
     CodeImpactAnalysis,
 ]
@@ -350,6 +368,38 @@ def create_repository_symbol_index_node(
     return repository_symbol_index_node
 
 
+def create_repository_dependency_graph_node(
+    graph_builder: RepositoryDependencyGraphBuilder,
+) -> Callable[
+    [ChangeAnalysisState],
+    dict[str, object],
+]:
+    """创建 Python 模块依赖图节点。"""
+
+    def repository_dependency_graph_node(
+        state: ChangeAnalysisState,
+    ) -> dict[str, object]:
+        """根据符号索引中的导入记录建立模块依赖图。"""
+
+        repository_symbol_index = state["repository_symbol_index"]
+
+        # 依赖图必须建立在已经完成的符号索引之上。
+        # 缺少索引通常意味着工作流节点顺序被错误修改。
+        if repository_symbol_index is None:
+            raise RuntimeError("工作流缺少代码仓库符号索引，无法建立模块依赖图。")
+
+        # 依赖图构建器是确定性工具，
+        # 只读取 AST 索引中的模块和 import 记录。
+        repository_dependency_graph = graph_builder(repository_symbol_index)
+
+        return {
+            "repository_dependency_graph": (repository_dependency_graph),
+            "status": ("repository_dependencies_mapped"),
+        }
+
+    return repository_dependency_graph_node
+
+
 def create_code_impact_analysis_node(
     analyzer: CodeImpactAnalyzer,
 ) -> Callable[
@@ -361,11 +411,12 @@ def create_code_impact_analysis_node(
     def code_impact_analysis_node(
         state: ChangeAnalysisState,
     ) -> dict[str, object]:
-        """根据需求、仓库快照和符号索引判断代码影响范围。"""
+        """根据需求、源码、符号索引和依赖图判断影响范围。"""
 
         requirement_analysis = state["requirement_analysis"]
         repository_snapshot = state["repository_snapshot"]
         repository_symbol_index = state["repository_symbol_index"]
+        repository_dependency_graph = state["repository_dependency_graph"]
 
         # 人工审核结果在关闭 HITL 的旧流程中
         # 可能为 None。
@@ -382,13 +433,19 @@ def create_code_impact_analysis_node(
         if repository_symbol_index is None:
             raise RuntimeError("工作流缺少代码仓库符号索引。")
 
-        # 把人工确认后的需求、真实仓库快照和 AST 符号证据
-        # 一起交给代码影响智能体。
+        # 依赖图用于识别修改目标模块后，
+        # 可能受到直接或间接影响的上游模块。
+        if repository_dependency_graph is None:
+            raise RuntimeError("工作流缺少代码仓库模块依赖图。")
+
+        # 把人工确认后的需求、真实仓库快照、
+        # AST 符号证据和模块依赖证据一起交给 Agent。
         impact_analysis = analyzer(
             requirement_analysis,
             repository_snapshot,
             requirement_review,
             repository_symbol_index,
+            repository_dependency_graph,
         )
 
         return {
@@ -405,6 +462,9 @@ def build_change_analysis_graph(
     repository_resolver: RepositoryResolver = (resolve_repository_directory),
     repository_scanner: RepositoryScanner = (scan_repository),
     repository_symbol_indexer: (RepositorySymbolIndexer) = index_python_symbols,
+    repository_dependency_graph_builder: (
+        RepositoryDependencyGraphBuilder
+    ) = build_python_dependency_graph,
     code_impact_analyzer: CodeImpactAnalyzer = (analyze_code_impact),
     human_review_enabled: bool = False,
     checkpointer: InMemorySaver | None = None,
@@ -419,6 +479,9 @@ def build_change_analysis_graph(
 
     repository_symbol_indexer 使用 Python AST
     从仓库快照中提取结构化代码信息。
+
+    repository_dependency_graph_builder 根据符号索引中的
+    import 记录建立确定性的模块依赖图。
     """
 
     builder = StateGraph(ChangeAnalysisState)
@@ -448,6 +511,12 @@ def build_change_analysis_graph(
     builder.add_node(
         "index_repository_symbols",
         create_repository_symbol_index_node(repository_symbol_indexer),
+    )
+
+    # 注册确定性的 Python 模块依赖图节点。
+    builder.add_node(
+        "map_repository_dependencies",
+        create_repository_dependency_graph_node(repository_dependency_graph_builder),
     )
 
     # 注册代码影响分析智能体节点。
@@ -519,10 +588,16 @@ def build_change_analysis_graph(
         "index_repository_symbols",
     )
 
-    # 符号索引完成后再调用代码影响智能体。
-    # 这保证工作流状态中已经存在索引结果。
+    # 符号索引完成后建立模块依赖图。
     builder.add_edge(
         "index_repository_symbols",
+        "map_repository_dependencies",
+    )
+
+    # 依赖图完成后再调用代码影响智能体。
+    # 这保证 Agent 同时获得符号和依赖证据。
+    builder.add_edge(
+        "map_repository_dependencies",
         "analyze_code_impact",
     )
 
