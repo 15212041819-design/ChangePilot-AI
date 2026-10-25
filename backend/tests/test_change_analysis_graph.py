@@ -11,7 +11,8 @@
 4. 人工批准后才会建立符号索引和模块依赖图。
 5. 依赖图会作为正式证据传给代码影响智能体。
 6. 代码影响分析会继续生成结构化测试策略。
-7. 人工拒绝后会修订需求并再次等待审核。
+7. 测试策略会继续生成有顺序的实施计划。
+8. 人工拒绝后会修订需求并再次等待审核。
 """
 
 from pathlib import Path
@@ -20,19 +21,17 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from app.graph.change_analysis import (
-    build_change_analysis_graph,
-)
+from app.graph.change_analysis import build_change_analysis_graph
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
 )
 from app.schemas.code_index import RepositorySymbolIndex
-from app.schemas.dependency_graph import (
-    RepositoryDependencyGraph,
-)
-from app.schemas.human_review import (
-    RequirementReviewDecision,
+from app.schemas.dependency_graph import RepositoryDependencyGraph
+from app.schemas.human_review import RequirementReviewDecision
+from app.schemas.implementation_plan import (
+    ImplementationPlan,
+    ImplementationStep,
 )
 from app.schemas.repository import (
     RepositoryFile,
@@ -203,7 +202,7 @@ def fake_test_strategy_analyzer(
                 steps=[
                     "调用 cancel_order",
                 ],
-                expected_result=("订单状态变为 CANCELLED"),
+                expected_result="订单状态变为 CANCELLED",
             )
         ],
         test_files=[
@@ -223,15 +222,139 @@ def fake_test_strategy_analyzer(
     )
 
 
+def fake_implementation_plan_analyzer(
+    requirement: RequirementAnalysis,
+    code_impact: CodeImpactAnalysis,
+    test_strategy: StrategyResult,
+    repository: RepositorySnapshot,
+    review: RequirementReviewDecision | None,
+    symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
+) -> ImplementationPlan:
+    """模拟接收全部分析结果的实施计划智能体。"""
+
+    # 实施计划不能只根据用户原始需求生成，
+    # 必须能够收到前面所有分析阶段产生的真实证据。
+    assert "待支付订单可以取消" in requirement.acceptance_criteria
+    assert code_impact.impacted_files[0].path == "order_app/service.py"
+    assert test_strategy.scenarios[0].name == "取消待支付订单"
+    assert repository.repository_name == "order_service"
+    assert symbol_index.repository_name == repository.repository_name
+    assert dependency_graph.repository_name == repository.repository_name
+
+    if requirement.assumptions:
+        assert review is not None
+        assert review.action == "approve"
+
+    return ImplementationPlan(
+        summary="先修改业务代码，再补充测试并执行验证",
+        steps=[
+            ImplementationStep(
+                step_id="step-update-service",
+                title="实现取消订单逻辑",
+                action="modify",
+                target_path="order_app/service.py",
+                priority="high",
+                description="实现订单取消业务规则",
+                changes=[
+                    "新增 cancel_order 方法",
+                ],
+                depends_on=[],
+                related_acceptance_criteria=[
+                    "待支付订单可以取消",
+                ],
+                related_test_scenarios=[],
+                risk_level="high",
+                verification_commands=[],
+                rollback_instructions=[
+                    "恢复订单服务修改前的版本",
+                ],
+            ),
+            ImplementationStep(
+                step_id="step-update-tests",
+                title="补充取消订单测试",
+                action="modify",
+                target_path="tests/test_service.py",
+                priority="high",
+                description="覆盖待支付订单取消场景",
+                changes=[
+                    "新增取消订单测试",
+                ],
+                depends_on=[
+                    "step-update-service",
+                ],
+                related_acceptance_criteria=[
+                    "待支付订单可以取消",
+                ],
+                related_test_scenarios=[
+                    "取消待支付订单",
+                ],
+                risk_level="medium",
+                verification_commands=[
+                    "python -m pytest tests/test_service.py -q",
+                ],
+                rollback_instructions=[
+                    "删除新增测试",
+                ],
+            ),
+            ImplementationStep(
+                step_id="step-verify",
+                title="执行完整验证",
+                action="verify",
+                target_path=None,
+                priority="high",
+                description="运行静态检查和自动化测试",
+                changes=[
+                    "执行 Ruff 和 pytest",
+                ],
+                depends_on=[
+                    "step-update-tests",
+                ],
+                related_acceptance_criteria=[
+                    "待支付订单可以取消",
+                ],
+                related_test_scenarios=[
+                    "取消待支付订单",
+                ],
+                risk_level="low",
+                verification_commands=[
+                    "python -m ruff check .",
+                    "python -m pytest -q",
+                ],
+                rollback_instructions=[
+                    "根据失败步骤恢复对应文件",
+                ],
+            ),
+        ],
+        execution_order=[
+            "step-update-service",
+            "step-update-tests",
+            "step-verify",
+        ],
+        final_verification_commands=[
+            "python -m ruff check .",
+            "python -m pytest -q",
+        ],
+        rollback_checkpoints=[
+            "修改代码前记录 Git 状态",
+        ],
+        risks=[
+            "支付和取消并发需要额外验证",
+        ],
+        assumptions=[],
+    )
+
+
 def build_test_graph():
     """创建不启用人工审核的测试工作流。"""
 
     return build_change_analysis_graph(
-        requirement_analyzer=(fake_requirement_analyzer),
-        repository_resolver=(fake_repository_resolver),
-        repository_scanner=(fake_repository_scanner),
-        code_impact_analyzer=(fake_code_impact_analyzer),
-        test_strategy_analyzer=(fake_test_strategy_analyzer),
+        requirement_analyzer=fake_requirement_analyzer,
+        repository_resolver=fake_repository_resolver,
+        repository_scanner=fake_repository_scanner,
+        code_impact_analyzer=fake_code_impact_analyzer,
+        test_strategy_analyzer=fake_test_strategy_analyzer,
+        implementation_plan_analyzer=(fake_implementation_plan_analyzer),
     )
 
 
@@ -249,12 +372,13 @@ def create_initial_state() -> dict[str, object]:
         "repository_dependency_graph": None,
         "code_impact_analysis": None,
         "test_strategy": None,
+        "implementation_plan": None,
         "status": "received",
     }
 
 
 def test_change_analysis_graph_runs_complete_workflow() -> None:
-    """工作流应该完成扫描、索引、影响分析和测试策略。"""
+    """工作流应该完成实施计划生成前的全部分析步骤。"""
 
     graph = build_test_graph()
 
@@ -266,9 +390,10 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     repository_dependency_graph = result["repository_dependency_graph"]
     code_impact_analysis = result["code_impact_analysis"]
     test_strategy = result["test_strategy"]
+    implementation_plan = result["implementation_plan"]
 
     assert result["normalized_request"] == ("为订单系统增加 取消功能")
-    assert result["status"] == ("test_strategy_generated")
+    assert result["status"] == ("implementation_plan_generated")
 
     assert requirement_analysis is not None
     assert repository_snapshot is not None
@@ -276,6 +401,7 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     assert repository_dependency_graph is not None
     assert code_impact_analysis is not None
     assert test_strategy is not None
+    assert implementation_plan is not None
 
     assert requirement_analysis.change_type == "feature"
 
@@ -300,6 +426,10 @@ def test_change_analysis_graph_runs_complete_workflow() -> None:
     assert code_impact_analysis.impacted_files[0].path == "order_app/service.py"
     assert test_strategy.scenarios[0].name == "取消待支付订单"
     assert test_strategy.test_files[0].path == "tests/test_service.py"
+
+    # 最终步骤应当是统一执行代码检查和测试，
+    # 证明实施步骤具有明确的先后顺序。
+    assert implementation_plan.execution_order[-1] == "step-verify"
 
 
 def test_change_analysis_graph_rejects_empty_request() -> None:
@@ -385,10 +515,11 @@ def build_reviewable_test_graph():
     return build_change_analysis_graph(
         requirement_analyzer=(fake_requirement_analyzer_with_assumptions),
         requirement_revision_analyzer=(fake_requirement_revision_analyzer),
-        repository_resolver=(fake_repository_resolver),
-        repository_scanner=(fake_repository_scanner),
-        code_impact_analyzer=(fake_code_impact_analyzer),
-        test_strategy_analyzer=(fake_test_strategy_analyzer),
+        repository_resolver=fake_repository_resolver,
+        repository_scanner=fake_repository_scanner,
+        code_impact_analyzer=fake_code_impact_analyzer,
+        test_strategy_analyzer=fake_test_strategy_analyzer,
+        implementation_plan_analyzer=(fake_implementation_plan_analyzer),
         human_review_enabled=True,
         # 人工中断和恢复必须使用检查点。
         checkpointer=InMemorySaver(),
@@ -399,7 +530,7 @@ def create_reviewable_initial_state() -> dict[str, object]:
     """创建人工审核工作流使用的初始状态。"""
 
     return {
-        "request_text": ("为订单系统增加取消订单功能"),
+        "request_text": "为订单系统增加取消订单功能",
         "normalized_request": "",
         "repository_name": "order_service",
         "requirement_analysis": None,
@@ -409,6 +540,7 @@ def create_reviewable_initial_state() -> dict[str, object]:
         "repository_dependency_graph": None,
         "code_impact_analysis": None,
         "test_strategy": None,
+        "implementation_plan": None,
         "status": "received",
     }
 
@@ -420,7 +552,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
 
     config = {
         "configurable": {
-            "thread_id": ("requirement-review-approved"),
+            "thread_id": "requirement-review-approved",
         }
     }
 
@@ -439,6 +571,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     assert paused_result["repository_dependency_graph"] is None
     assert paused_result["code_impact_analysis"] is None
     assert paused_result["test_strategy"] is None
+    assert paused_result["implementation_plan"] is None
 
     interrupts = paused_result["__interrupt__"]
 
@@ -455,7 +588,7 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
         Command(
             resume={
                 "action": "approve",
-                "feedback": ("确认使用 cancelled 状态。"),
+                "feedback": "确认使用 cancelled 状态。",
             }
         ),
         config=config,
@@ -465,18 +598,20 @@ def test_change_analysis_graph_continues_after_review_approval() -> None:
     symbol_index = completed_result["repository_symbol_index"]
     dependency_graph = completed_result["repository_dependency_graph"]
 
-    assert completed_result["status"] == ("test_strategy_generated")
+    assert completed_result["status"] == ("implementation_plan_generated")
     assert review_decision is not None
     assert review_decision.action == "approve"
 
     assert completed_result["repository_snapshot"] is not None
     assert symbol_index is not None
     assert symbol_index.symbol_count == 2
+
     assert dependency_graph is not None
     assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None
     assert completed_result["test_strategy"] is not None
+    assert completed_result["implementation_plan"] is not None
 
 
 def test_change_analysis_graph_revises_after_review_rejection() -> None:
@@ -486,7 +621,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
 
     config = {
         "configurable": {
-            "thread_id": ("requirement-review-revised"),
+            "thread_id": "requirement-review-revised",
         }
     }
 
@@ -503,7 +638,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
         Command(
             resume={
                 "action": "reject",
-                "feedback": ("状态名称需要重新讨论。"),
+                "feedback": "状态名称需要重新讨论。",
             }
         ),
         config=config,
@@ -522,6 +657,7 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     assert second_paused_result["repository_dependency_graph"] is None
     assert second_paused_result["code_impact_analysis"] is None
     assert second_paused_result["test_strategy"] is None
+    assert second_paused_result["implementation_plan"] is None
 
     revised_analysis = second_paused_result["requirement_analysis"]
 
@@ -555,15 +691,17 @@ def test_change_analysis_graph_revises_after_review_rejection() -> None:
     symbol_index = completed_result["repository_symbol_index"]
     dependency_graph = completed_result["repository_dependency_graph"]
 
-    assert completed_result["status"] == ("test_strategy_generated")
+    assert completed_result["status"] == ("implementation_plan_generated")
     assert review_decision is not None
     assert review_decision.action == "approve"
 
     assert completed_result["repository_snapshot"] is not None
     assert symbol_index is not None
     assert symbol_index.symbol_count == 2
+
     assert dependency_graph is not None
     assert dependency_graph.internal_dependency_count == 1
 
     assert completed_result["code_impact_analysis"] is not None
     assert completed_result["test_strategy"] is not None
+    assert completed_result["implementation_plan"] is not None

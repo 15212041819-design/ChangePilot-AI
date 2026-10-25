@@ -12,11 +12,8 @@
 6. 根据 Python 导入关系建立模块依赖图。
 7. 使用代码影响智能体分析需要修改的文件。
 8. 使用测试策略智能体生成可追踪的测试计划。
-9. 结束工作流并返回统一结果。
-
-符号索引和依赖图都会保存在 LangGraph 状态中，
-并作为代码影响智能体的正式输入，
-帮助模型定位真实代码符号和模块影响传播关系。
+9. 使用实施计划智能体生成有顺序的开发任务清单。
+10. 结束工作流并返回统一结果。
 """
 
 from collections.abc import Callable
@@ -29,28 +26,44 @@ from langgraph.types import interrupt
 
 from app.schemas.code_impact import CodeImpactAnalysis
 from app.schemas.code_index import RepositorySymbolIndex
-from app.schemas.dependency_graph import RepositoryDependencyGraph
+from app.schemas.dependency_graph import (
+    RepositoryDependencyGraph,
+)
 from app.schemas.human_review import (
     RequirementReviewDecision,
     RequirementReviewPrompt,
 )
+from app.schemas.implementation_plan import (
+    ImplementationPlan,
+)
 from app.schemas.repository import RepositorySnapshot
 from app.schemas.requirement import RequirementAnalysis
 from app.schemas.test_strategy import TestStrategy
-from app.services.code_impact_agent import analyze_code_impact
+from app.services.code_impact_agent import (
+    analyze_code_impact,
+)
+from app.services.implementation_plan_agent import (
+    generate_implementation_plan,
+)
 from app.services.requirement_agent import (
     analyze_requirement,
     revise_requirement,
 )
-from app.services.test_strategy_agent import generate_test_strategy
+from app.services.test_strategy_agent import (
+    generate_test_strategy,
+)
 from app.tools.python_dependency_graph import (
     build_python_dependency_graph,
 )
 from app.tools.python_symbol_indexer import (
     index_python_symbols,
 )
-from app.tools.repository_scanner import scan_repository
-from app.tools.workspace import resolve_repository_directory
+from app.tools.repository_scanner import (
+    scan_repository,
+)
+from app.tools.workspace import (
+    resolve_repository_directory,
+)
 
 
 class ChangeAnalysisState(TypedDict):
@@ -69,39 +82,36 @@ class ChangeAnalysisState(TypedDict):
     requirement_analysis: RequirementAnalysis | None
 
     # 人工审核人员提交的批准或拒绝决定。
-    # 尚未进入人工审核阶段时为 None。
     requirement_review: RequirementReviewDecision | None
 
     # 仓库扫描节点生成的真实代码快照。
     repository_snapshot: RepositorySnapshot | None
 
     # Python 符号索引节点生成的结构化代码索引。
-    # 仓库尚未扫描或索引时为 None。
     repository_symbol_index: RepositorySymbolIndex | None
 
     # Python 依赖图节点生成的模块导入关系。
-    # 符号索引尚未生成或依赖图尚未构建时为 None。
     repository_dependency_graph: RepositoryDependencyGraph | None
 
     # 代码影响智能体生成的代码影响分析。
     code_impact_analysis: CodeImpactAnalysis | None
 
-    # 测试策略智能体根据需求、影响分析和真实仓库证据
-    # 生成的结构化测试计划。
+    # 测试策略智能体生成的结构化测试计划。
     test_strategy: TestStrategy | None
+
+    # 实施计划智能体根据全部上游分析结果
+    # 生成的有顺序开发任务清单。
+    implementation_plan: ImplementationPlan | None
 
     # 工作流目前执行到的阶段。
     status: str
 
 
-# 需求分析智能体接收规范化后的需求文本。
 RequirementAnalyzer = Callable[
     [str],
     RequirementAnalysis,
 ]
 
-# 需求修订智能体接收原始需求、
-# 上一版分析结果以及人工拒绝反馈。
 RequirementRevisionAnalyzer = Callable[
     [
         str,
@@ -111,35 +121,26 @@ RequirementRevisionAnalyzer = Callable[
     RequirementAnalysis,
 ]
 
-# 工作区解析器把用户提供的仓库名称
-# 转换成经过安全校验的本地目录。
 RepositoryResolver = Callable[
     [str],
     Path,
 ]
 
-# 仓库扫描器读取真实代码并生成有限、安全的快照。
 RepositoryScanner = Callable[
     [str | Path],
     RepositorySnapshot,
 ]
 
-# 符号索引器接收仓库快照，
-# 返回类、函数、方法和导入关系。
 RepositorySymbolIndexer = Callable[
     [RepositorySnapshot],
     RepositorySymbolIndex,
 ]
 
-# 依赖图构建器接收符号索引，
-# 返回仓库内模块、内部依赖、外部依赖和未解析依赖。
 RepositoryDependencyGraphBuilder = Callable[
     [RepositorySymbolIndex],
     RepositoryDependencyGraph,
 ]
 
-# 代码影响智能体接收需求分析、仓库快照、
-# 人工审核结果、Python 符号索引和模块依赖图。
 CodeImpactAnalyzer = Callable[
     [
         RequirementAnalysis,
@@ -151,8 +152,6 @@ CodeImpactAnalyzer = Callable[
     CodeImpactAnalysis,
 ]
 
-# 测试策略智能体接收需求、代码影响分析、仓库快照、
-# 人工审核结果、符号索引和模块依赖图。
 TestStrategyAnalyzer = Callable[
     [
         RequirementAnalysis,
@@ -165,15 +164,25 @@ TestStrategyAnalyzer = Callable[
     TestStrategy,
 ]
 
+ImplementationPlanAnalyzer = Callable[
+    [
+        RequirementAnalysis,
+        CodeImpactAnalysis,
+        TestStrategy,
+        RepositorySnapshot,
+        RequirementReviewDecision | None,
+        RepositorySymbolIndex,
+        RepositoryDependencyGraph,
+    ],
+    ImplementationPlan,
+]
+
 
 def normalize_request(
     state: ChangeAnalysisState,
 ) -> dict[str, str]:
     """清理用户输入的软件变更需求。"""
 
-    # split() 会按任意空白字符切分文本。
-    # 使用单个空格重新连接，可以清除多余空格、
-    # 换行符和制表符。
     normalized_request = " ".join(state["request_text"].split())
 
     if not normalized_request:
@@ -224,18 +233,12 @@ def create_requirement_revision_node(
         previous_analysis = state["requirement_analysis"]
         review_decision = state["requirement_review"]
 
-        # 需求修订必须建立在已有分析结果之上。
         if previous_analysis is None:
             raise RuntimeError("工作流缺少待修订的需求分析结果。")
 
-        # 只有人工明确拒绝当前需求分析时，
-        # 工作流才允许进入需求修订节点。
         if review_decision is None or review_decision.action != "reject":
             raise RuntimeError("工作流缺少有效的需求拒绝决定。")
 
-        # 拒绝反馈是需求修订的重要输入。
-        # Pydantic 模型已经校验过一次，
-        # 这里再次检查以保护节点的独立调用。
         review_feedback = review_decision.feedback
 
         if not review_feedback:
@@ -265,37 +268,31 @@ def review_requirement(
 
     requirement_analysis = state["requirement_analysis"]
 
-    # 人工审核节点必须建立在需求分析结果之上。
     if requirement_analysis is None:
         raise RuntimeError("工作流缺少需求分析结果。")
 
-    # 如果没有任何待确认假设，
-    # 系统可以自动批准并继续扫描仓库。
+    # 没有待确认假设时自动批准。
     if not requirement_analysis.assumptions:
         return {
             "requirement_review": (
                 RequirementReviewDecision(
                     action="approve",
-                    feedback="需求分析中没有待确认假设，系统自动继续。",
+                    feedback=("需求分析中没有待确认假设，系统自动继续。"),
                 )
             ),
             "status": "requirement_approved",
         }
 
-    # 将需求摘要、假设和澄清问题
-    # 转换成前端可以直接展示的审核载荷。
     review_prompt = RequirementReviewPrompt(
         summary=requirement_analysis.summary,
-        assumptions=requirement_analysis.assumptions,
+        assumptions=(requirement_analysis.assumptions),
         clarification_questions=(requirement_analysis.clarification_questions),
     )
 
-    # interrupt() 会暂停当前 LangGraph 工作流。
-    # 恢复时，Command(resume=...) 中的数据
-    # 会成为这里的返回值。
+    # 暂停工作流，等待用户批准或拒绝。
     decision = interrupt(
         review_prompt.model_dump(mode="json"),
-        response_schema=RequirementReviewDecision,
+        response_schema=(RequirementReviewDecision),
     )
 
     review_status = (
@@ -318,12 +315,9 @@ def route_after_requirement_review(
     if decision is None:
         raise RuntimeError("工作流缺少需求人工审核结果。")
 
-    # 批准后才允许读取仓库并分析代码。
     if decision.action == "approve":
         return "continue"
 
-    # 拒绝后返回需求修订节点，
-    # 而不是结束整个工作流。
     return "revise"
 
 
@@ -341,16 +335,11 @@ def create_repository_scan_node(
     ) -> dict[str, object]:
         """解析仓库名称并读取真实代码文件。"""
 
-        # resolver 会确保最终目录
-        # 位于允许访问的工作区内部。
         repository_path = resolver(state["repository_name"])
-
-        # scanner 会过滤缓存目录、依赖目录、
-        # 密钥文件和体积过大的文件。
         repository_snapshot = scanner(repository_path)
 
         return {
-            "repository_snapshot": repository_snapshot,
+            "repository_snapshot": (repository_snapshot),
             "status": "repository_scanned",
         }
 
@@ -372,17 +361,13 @@ def create_repository_symbol_index_node(
 
         repository_snapshot = state["repository_snapshot"]
 
-        # 符号索引只能在仓库扫描完成后执行。
-        # 缺少快照通常意味着图的边连接错误。
         if repository_snapshot is None:
             raise RuntimeError("工作流缺少代码仓库快照，无法建立符号索引。")
 
-        # 索引器是确定性工具，不调用大模型，
-        # 也不会执行仓库中的 Python 代码。
         repository_symbol_index = indexer(repository_snapshot)
 
         return {
-            "repository_symbol_index": repository_symbol_index,
+            "repository_symbol_index": (repository_symbol_index),
             "status": "repository_indexed",
         }
 
@@ -390,7 +375,7 @@ def create_repository_symbol_index_node(
 
 
 def create_repository_dependency_graph_node(
-    graph_builder: RepositoryDependencyGraphBuilder,
+    graph_builder: (RepositoryDependencyGraphBuilder),
 ) -> Callable[
     [ChangeAnalysisState],
     dict[str, object],
@@ -404,18 +389,14 @@ def create_repository_dependency_graph_node(
 
         repository_symbol_index = state["repository_symbol_index"]
 
-        # 依赖图必须建立在已经完成的符号索引之上。
-        # 缺少索引通常意味着工作流节点顺序被错误修改。
         if repository_symbol_index is None:
             raise RuntimeError("工作流缺少代码仓库符号索引，无法建立模块依赖图。")
 
-        # 依赖图构建器是确定性工具，
-        # 只读取 AST 索引中的模块和 import 记录。
         repository_dependency_graph = graph_builder(repository_symbol_index)
 
         return {
             "repository_dependency_graph": (repository_dependency_graph),
-            "status": "repository_dependencies_mapped",
+            "status": ("repository_dependencies_mapped"),
         }
 
     return repository_dependency_graph_node
@@ -438,9 +419,6 @@ def create_code_impact_analysis_node(
         repository_snapshot = state["repository_snapshot"]
         repository_symbol_index = state["repository_symbol_index"]
         repository_dependency_graph = state["repository_dependency_graph"]
-
-        # 人工审核结果在关闭 HITL 的旧流程中
-        # 可能为 None。
         requirement_review = state.get("requirement_review")
 
         if requirement_analysis is None:
@@ -449,18 +427,12 @@ def create_code_impact_analysis_node(
         if repository_snapshot is None:
             raise RuntimeError("工作流缺少代码仓库快照。")
 
-        # 代码影响智能体必须使用确定性的符号索引，
-        # 不能只依赖模型阅读原始源码后自行猜测类和函数。
         if repository_symbol_index is None:
             raise RuntimeError("工作流缺少代码仓库符号索引。")
 
-        # 依赖图用于识别修改目标模块后，
-        # 可能受到直接或间接影响的上游模块。
         if repository_dependency_graph is None:
             raise RuntimeError("工作流缺少代码仓库模块依赖图。")
 
-        # 把人工确认后的需求、真实仓库快照、
-        # AST 符号证据和模块依赖证据一起交给 Agent。
         impact_analysis = analyzer(
             requirement_analysis,
             repository_snapshot,
@@ -470,7 +442,7 @@ def create_code_impact_analysis_node(
         )
 
         return {
-            "code_impact_analysis": impact_analysis,
+            "code_impact_analysis": (impact_analysis),
             "status": "code_impact_analyzed",
         }
 
@@ -497,8 +469,6 @@ def create_test_strategy_node(
         repository_dependency_graph = state["repository_dependency_graph"]
         requirement_review = state.get("requirement_review")
 
-        # 测试策略是代码影响分析的下游结果，
-        # 所有上游证据都必须完整存在。
         if requirement_analysis is None:
             raise RuntimeError("工作流缺少需求分析结果。")
 
@@ -514,8 +484,6 @@ def create_test_strategy_node(
         if repository_dependency_graph is None:
             raise RuntimeError("工作流缺少代码仓库模块依赖图。")
 
-        # 测试策略 Agent 会再次校验代码影响中的文件路径，
-        # 并确保测试场景能够追踪到真实验收条件。
         test_strategy = analyzer(
             requirement_analysis,
             code_impact_analysis,
@@ -533,17 +501,77 @@ def create_test_strategy_node(
     return test_strategy_node
 
 
+def create_implementation_plan_node(
+    analyzer: ImplementationPlanAnalyzer,
+) -> Callable[
+    [ChangeAnalysisState],
+    dict[str, object],
+]:
+    """创建实施计划智能体节点。"""
+
+    def implementation_plan_node(
+        state: ChangeAnalysisState,
+    ) -> dict[str, object]:
+        """根据全部分析证据生成有顺序的开发任务清单。"""
+
+        requirement_analysis = state["requirement_analysis"]
+        code_impact_analysis = state["code_impact_analysis"]
+        test_strategy = state["test_strategy"]
+        repository_snapshot = state["repository_snapshot"]
+        repository_symbol_index = state["repository_symbol_index"]
+        repository_dependency_graph = state["repository_dependency_graph"]
+        requirement_review = state.get("requirement_review")
+
+        # 实施计划是最终分析结果，
+        # 必须建立在完整的上游证据之上。
+        if requirement_analysis is None:
+            raise RuntimeError("工作流缺少需求分析结果。")
+
+        if code_impact_analysis is None:
+            raise RuntimeError("工作流缺少代码影响分析结果。")
+
+        if test_strategy is None:
+            raise RuntimeError("工作流缺少测试策略。")
+
+        if repository_snapshot is None:
+            raise RuntimeError("工作流缺少代码仓库快照。")
+
+        if repository_symbol_index is None:
+            raise RuntimeError("工作流缺少代码仓库符号索引。")
+
+        if repository_dependency_graph is None:
+            raise RuntimeError("工作流缺少代码仓库模块依赖图。")
+
+        implementation_plan = analyzer(
+            requirement_analysis,
+            code_impact_analysis,
+            test_strategy,
+            repository_snapshot,
+            requirement_review,
+            repository_symbol_index,
+            repository_dependency_graph,
+        )
+
+        return {
+            "implementation_plan": (implementation_plan),
+            "status": ("implementation_plan_generated"),
+        }
+
+    return implementation_plan_node
+
+
 def build_change_analysis_graph(
-    requirement_analyzer: RequirementAnalyzer = (analyze_requirement),
-    requirement_revision_analyzer: RequirementRevisionAnalyzer = (revise_requirement),
+    requirement_analyzer: (RequirementAnalyzer) = analyze_requirement,
+    requirement_revision_analyzer: (RequirementRevisionAnalyzer) = revise_requirement,
     repository_resolver: RepositoryResolver = (resolve_repository_directory),
-    repository_scanner: RepositoryScanner = scan_repository,
-    repository_symbol_indexer: RepositorySymbolIndexer = (index_python_symbols),
+    repository_scanner: RepositoryScanner = (scan_repository),
+    repository_symbol_indexer: (RepositorySymbolIndexer) = index_python_symbols,
     repository_dependency_graph_builder: (
         RepositoryDependencyGraphBuilder
     ) = build_python_dependency_graph,
-    code_impact_analyzer: CodeImpactAnalyzer = analyze_code_impact,
-    test_strategy_analyzer: TestStrategyAnalyzer = (generate_test_strategy),
+    code_impact_analyzer: (CodeImpactAnalyzer) = analyze_code_impact,
+    test_strategy_analyzer: (TestStrategyAnalyzer) = generate_test_strategy,
+    implementation_plan_analyzer: (ImplementationPlanAnalyzer) = generate_implementation_plan,
     human_review_enabled: bool = False,
     checkpointer: InMemorySaver | None = None,
 ):
@@ -563,23 +591,23 @@ def build_change_analysis_graph(
 
     test_strategy_analyzer 根据已确认需求、代码影响结果
     和仓库证据生成结构化测试计划。
+
+    implementation_plan_analyzer 根据全部分析结果
+    生成带依赖、验证命令和回滚说明的开发任务清单。
     """
 
     builder = StateGraph(ChangeAnalysisState)
 
-    # 注册需求规范化节点。
     builder.add_node(
         "normalize_request",
         normalize_request,
     )
 
-    # 注册首次需求分析智能体节点。
     builder.add_node(
         "analyze_requirement",
         create_requirement_analysis_node(requirement_analyzer),
     )
 
-    # 注册安全仓库扫描节点。
     builder.add_node(
         "scan_repository",
         create_repository_scan_node(
@@ -588,64 +616,57 @@ def build_change_analysis_graph(
         ),
     )
 
-    # 注册确定性的 Python 符号索引节点。
     builder.add_node(
         "index_repository_symbols",
         create_repository_symbol_index_node(repository_symbol_indexer),
     )
 
-    # 注册确定性的 Python 模块依赖图节点。
     builder.add_node(
         "map_repository_dependencies",
         create_repository_dependency_graph_node(repository_dependency_graph_builder),
     )
 
-    # 注册代码影响分析智能体节点。
     builder.add_node(
         "analyze_code_impact",
         create_code_impact_analysis_node(code_impact_analyzer),
     )
 
-    # 注册测试策略智能体节点。
     builder.add_node(
         "generate_test_strategy",
         create_test_strategy_node(test_strategy_analyzer),
     )
 
-    # 工作流入口首先清理用户输入。
+    builder.add_node(
+        "generate_implementation_plan",
+        create_implementation_plan_node(implementation_plan_analyzer),
+    )
+
     builder.add_edge(
         START,
         "normalize_request",
     )
 
-    # 输入规范化后执行首次需求分析。
     builder.add_edge(
         "normalize_request",
         "analyze_requirement",
     )
 
     if human_review_enabled:
-        # 启用人工审核时，
-        # 在需求分析和仓库扫描之间加入审核节点。
         builder.add_node(
             "review_requirement",
             review_requirement,
         )
 
-        # 注册人工拒绝后的需求修订节点。
         builder.add_node(
             "revise_requirement",
             create_requirement_revision_node(requirement_revision_analyzer),
         )
 
-        # 首次需求分析完成后进入人工审核。
         builder.add_edge(
             "analyze_requirement",
             "review_requirement",
         )
 
-        # 批准后扫描仓库；
-        # 拒绝后根据反馈修订需求。
         builder.add_conditional_edges(
             "review_requirement",
             route_after_requirement_review,
@@ -655,61 +676,52 @@ def build_change_analysis_graph(
             },
         )
 
-        # 修订完成后重新进入人工审核，
-        # 形成“审核—修订—再审核”闭环。
         builder.add_edge(
             "revise_requirement",
             "review_requirement",
         )
     else:
-        # 关闭人工审核时，
-        # 需求分析完成后直接扫描仓库。
         builder.add_edge(
             "analyze_requirement",
             "scan_repository",
         )
 
-    # 仓库扫描完成后建立结构化符号索引。
     builder.add_edge(
         "scan_repository",
         "index_repository_symbols",
     )
 
-    # 符号索引完成后建立模块依赖图。
     builder.add_edge(
         "index_repository_symbols",
         "map_repository_dependencies",
     )
 
-    # 依赖图完成后再调用代码影响智能体。
-    # 这保证 Agent 同时获得符号和依赖证据。
     builder.add_edge(
         "map_repository_dependencies",
         "analyze_code_impact",
     )
 
-    # 代码影响分析完成后生成结构化测试策略。
     builder.add_edge(
         "analyze_code_impact",
         "generate_test_strategy",
     )
 
-    # 测试策略生成后结束工作流。
     builder.add_edge(
         "generate_test_strategy",
+        "generate_implementation_plan",
+    )
+
+    builder.add_edge(
+        "generate_implementation_plan",
         END,
     )
 
-    # 没有人工中断时可以不提供检查点。
-    # 启用人工审核并需要恢复工作流时，
-    # 应传入 InMemorySaver 或持久化检查点。
     return builder.compile(checkpointer=checkpointer)
 
 
 # 生产 API 正式启用需求人工审核。
 # InMemorySaver 适合当前本地开发阶段，
-# 但服务重启后检查点会丢失。
-# 后续将替换成 SQLite 或 PostgreSQL 检查点。
+# 服务重启后检查点会丢失。
 change_analysis_graph = build_change_analysis_graph(
     human_review_enabled=True,
     checkpointer=InMemorySaver(),
