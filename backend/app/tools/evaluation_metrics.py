@@ -1,7 +1,8 @@
 """计算离线评测指标，并为失败样本保留明确诊断。
 
-召回率使用改动提交中的源码文件作为 truth。测试文件会在后续测试策略
-专用指标中评估，避免把测试文件命名规律混入代码影响分析的召回率。
+召回率只使用分析快照中已经存在的源码文件作为 truth。目标提交新增的
+源码文件无法从 ``commit^`` 候选池检索，因此只单独计数，不进入既有文件
+召回率分母。测试文件会在后续测试策略专用指标中评估。
 所有聚合指标均覆盖完整数据集；缺失 observation 会被记为 failed。
 """
 
@@ -36,7 +37,10 @@ def _safe_ratio(
     if denominator == 0:
         return 0.0
 
-    return round(numerator / denominator, 6)
+    return round(
+        numerator / denominator,
+        6,
+    )
 
 
 def _recall(
@@ -69,7 +73,10 @@ def _index_observations(
 ) -> dict[str, EvaluationObservation]:
     """按 sample_id 建立索引，并拒绝重复或未知结果。"""
 
-    indexed: dict[str, EvaluationObservation] = {}
+    indexed: dict[
+        str,
+        EvaluationObservation,
+    ] = {}
 
     for observation in observations:
         if observation.sample_id not in known_sample_ids:
@@ -93,14 +100,19 @@ def _missing_observation_metrics(
     return SampleEvaluationMetrics(
         sample_id=sample.sample_id,
         status="failed",
+        existing_file_recall_evaluable=(bool(sample.existing_source_files)),
+        existing_source_file_count=len(sample.existing_source_files),
+        new_source_file_count=len(sample.new_source_files),
         pool_recall_at_k=0.0,
         file_recall_at_k=0.0,
         hallucination_rate=0.0,
+        hallucination_evaluable=False,
+        reported_path_count=0,
         coverage_rate=0.0,
         latency_ms=0.0,
         token_count=0,
-        missing_truth_in_pool=sample.source_files,
-        missing_truth_in_selection=sample.source_files,
+        missing_truth_in_pool=(sample.existing_source_files),
+        missing_truth_in_selection=(sample.existing_source_files),
         invalid_reported_paths=(),
         error="missing_observation",
     )
@@ -116,24 +128,31 @@ def _sample_metrics(
     """计算一条已观察样本的指标。"""
 
     pool_paths = observation.candidate_pool_paths[:pool_k]
+
     selected_paths = observation.selected_paths[:file_k]
+
     reported_count = len(observation.reported_paths)
 
     return SampleEvaluationMetrics(
         sample_id=sample.sample_id,
         status=observation.status,
+        existing_file_recall_evaluable=(bool(sample.existing_source_files)),
+        existing_source_file_count=len(sample.existing_source_files),
+        new_source_file_count=len(sample.new_source_files),
         pool_recall_at_k=_recall(
-            sample.source_files,
+            sample.existing_source_files,
             pool_paths,
         ),
         file_recall_at_k=_recall(
-            sample.source_files,
+            sample.existing_source_files,
             selected_paths,
         ),
         hallucination_rate=_safe_ratio(
             len(observation.invalid_reported_paths),
             reported_count,
         ),
+        hallucination_evaluable=(reported_count > 0),
+        reported_path_count=(reported_count),
         coverage_rate=_safe_ratio(
             observation.analyzed_item_count,
             observation.assigned_item_count,
@@ -142,14 +161,18 @@ def _sample_metrics(
             observation.latency_ms,
             3,
         ),
-        token_count=observation.token_count,
-        missing_truth_in_pool=_missing_paths(
-            sample.source_files,
-            pool_paths,
+        token_count=(observation.token_count),
+        missing_truth_in_pool=(
+            _missing_paths(
+                sample.existing_source_files,
+                pool_paths,
+            )
         ),
-        missing_truth_in_selection=_missing_paths(
-            sample.source_files,
-            selected_paths,
+        missing_truth_in_selection=(
+            _missing_paths(
+                sample.existing_source_files,
+                selected_paths,
+            )
         ),
         invalid_reported_paths=(observation.invalid_reported_paths),
         error=observation.error,
@@ -167,8 +190,8 @@ def calculate_evaluation_metrics(
     """计算一个实验组合在完整数据集上的聚合指标。
 
     pool/file recall 使用样本级宏平均，避免大提交支配结果。
-    hallucination 和 coverage 使用全局分子/分母，
-    更准确反映路径与工作量。
+    只有包含既有源码文件的样本才进入召回率平均值。
+    hallucination 和 coverage 使用全局分子/分母。
     """
 
     if not experiment_name.strip():
@@ -184,10 +207,12 @@ def calculate_evaluation_metrics(
         raise EvaluationMetricsError("评测数据集不能为空。")
 
     known_sample_ids = {sample.sample_id for sample in dataset.samples}
+
     indexed = _index_observations(
         observations,
         known_sample_ids,
     )
+
     sample_metrics: list[SampleEvaluationMetrics] = []
 
     total_invalid_paths = 0
@@ -208,40 +233,74 @@ def calculate_evaluation_metrics(
             pool_k=pool_k,
             file_k=file_k,
         )
+
         sample_metrics.append(metrics)
 
         total_invalid_paths += len(observation.invalid_reported_paths)
+
         total_reported_paths += len(observation.reported_paths)
+
         total_analyzed_items += observation.analyzed_item_count
+
         total_assigned_items += observation.assigned_item_count
 
     sample_count = len(sample_metrics)
 
     success_count = sum(item.status == "success" for item in sample_metrics)
+
     degraded_count = sum(item.status == "degraded" for item in sample_metrics)
+
     failed_count = sum(item.status == "failed" for item in sample_metrics)
 
+    existing_file_metrics = tuple(
+        item for item in sample_metrics if item.existing_file_recall_evaluable
+    )
+
+    existing_file_sample_count = len(existing_file_metrics)
+
+    new_file_sample_count = sum(item.new_source_file_count > 0 for item in sample_metrics)
+
+    existing_source_file_count = sum(item.existing_source_file_count for item in sample_metrics)
+
+    new_source_file_count = sum(item.new_source_file_count for item in sample_metrics)
+
     return EvaluationMetricsReport(
-        experiment_name=experiment_name.strip(),
+        experiment_name=(experiment_name.strip()),
         sample_count=sample_count,
         observed_sample_count=len(indexed),
         success_count=success_count,
         degraded_count=degraded_count,
         failed_count=failed_count,
+        existing_file_sample_count=(existing_file_sample_count),
+        new_file_sample_count=(new_file_sample_count),
+        existing_source_file_count=(existing_source_file_count),
+        new_source_file_count=(new_source_file_count),
         pool_k=pool_k,
         file_k=file_k,
         pool_recall_at_k=round(
-            sum(item.pool_recall_at_k for item in sample_metrics) / sample_count,
+            sum(item.pool_recall_at_k for item in existing_file_metrics)
+            / max(
+                existing_file_sample_count,
+                1,
+            ),
             6,
         ),
         file_recall_at_k=round(
-            sum(item.file_recall_at_k for item in sample_metrics) / sample_count,
+            sum(item.file_recall_at_k for item in existing_file_metrics)
+            / max(
+                existing_file_sample_count,
+                1,
+            ),
             6,
         ),
-        hallucination_rate=_safe_ratio(
-            total_invalid_paths,
-            total_reported_paths,
+        hallucination_rate=(
+            _safe_ratio(
+                total_invalid_paths,
+                total_reported_paths,
+            )
         ),
+        hallucination_evaluable=(total_reported_paths > 0),
+        reported_path_count=(total_reported_paths),
         failure_rate=_safe_ratio(
             failed_count,
             sample_count,

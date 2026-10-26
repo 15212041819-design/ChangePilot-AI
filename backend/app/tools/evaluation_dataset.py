@@ -11,7 +11,10 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
-from app.schemas.evaluation import EvaluationDataset, EvaluationSample
+from app.schemas.evaluation import (
+    EvaluationDataset,
+    EvaluationSample,
+)
 
 DEFAULT_SAMPLE_LIMIT = 15
 DEFAULT_SCAN_LIMIT = 200
@@ -34,7 +37,12 @@ def _run_git(
 
     try:
         completed = subprocess.run(
-            ["git", "-C", str(working_directory), *arguments],
+            [
+                "git",
+                "-C",
+                str(working_directory),
+                *arguments,
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -58,12 +66,17 @@ def _normalize_path(path: str) -> str:
     return "" if normalized in {"", "."} else normalized
 
 
-def _find_git_root(repository_path: Path) -> Path:
+def _find_git_root(
+    repository_path: Path,
+) -> Path:
     """查找目标目录所属的 Git 根目录。"""
 
     completed = _run_git(
         repository_path,
-        ("rev-parse", "--show-toplevel"),
+        (
+            "rev-parse",
+            "--show-toplevel",
+        ),
         check=False,
     )
 
@@ -78,7 +91,10 @@ def _find_git_root(repository_path: Path) -> Path:
     return Path(root_text).resolve()
 
 
-def _resolve_commit(git_root: Path, requested_ref: str) -> str:
+def _resolve_commit(
+    git_root: Path,
+    requested_ref: str,
+) -> str:
     """把分支、tag 或 SHA 解析为精确 commit。"""
 
     normalized_ref = requested_ref.strip()
@@ -118,7 +134,10 @@ def _repository_scope(
         raise EvaluationDatasetError("仓库路径位于 Git 根目录之外。")
 
     relative = _normalize_path(repository_path.relative_to(git_root).as_posix())
-    return relative, (() if not relative else ("--", relative))
+    return (
+        relative,
+        () if not relative else ("--", relative),
+    )
 
 
 def _commit_rows(
@@ -127,7 +146,10 @@ def _commit_rows(
     pathspec: tuple[str, ...],
     *,
     scan_limit: int,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
+) -> tuple[
+    tuple[str, tuple[str, ...]],
+    ...,
+]:
     """按从新到旧顺序返回提交及其父提交。"""
 
     arguments: list[str] = [
@@ -138,25 +160,44 @@ def _commit_rows(
         resolved_ref,
     ]
     arguments.extend(pathspec)
-    output = _run_git(git_root, tuple(arguments)).stdout
+
+    output = _run_git(
+        git_root,
+        tuple(arguments),
+    ).stdout
+
     rows: list[tuple[str, tuple[str, ...]]] = []
 
     for raw_line in output.splitlines():
         parts = tuple(part.lower() for part in raw_line.split() if part)
 
         if parts:
-            rows.append((parts[0], parts[1:]))
+            rows.append(
+                (
+                    parts[0],
+                    parts[1:],
+                )
+            )
 
     return tuple(rows)
 
 
-def _commit_subject(git_root: Path, commit: str) -> str:
+def _commit_subject(
+    git_root: Path,
+    commit: str,
+) -> str:
     """读取提交标题，并折叠多余空白。"""
 
     output = _run_git(
         git_root,
-        ("show", "-s", "--format=%s", commit),
+        (
+            "show",
+            "-s",
+            "--format=%s",
+            commit,
+        ),
     ).stdout
+
     return " ".join(output.split())
 
 
@@ -178,10 +219,20 @@ def _changed_paths(
     ]
 
     if repository_relative_path:
-        arguments.extend(("--", repository_relative_path))
+        arguments.extend(
+            (
+                "--",
+                repository_relative_path,
+            )
+        )
 
-    output = _run_git(git_root, tuple(arguments)).stdout
+    output = _run_git(
+        git_root,
+        tuple(arguments),
+    ).stdout
+
     prefix = f"{repository_relative_path}/" if repository_relative_path else ""
+
     paths: set[str] = set()
 
     for raw_path in output.split("\0"):
@@ -200,6 +251,35 @@ def _changed_paths(
             paths.add(normalized)
 
     return tuple(sorted(paths))
+
+
+def _path_exists_at_commit(
+    git_root: Path,
+    commit: str,
+    repository_relative_path: str,
+    path: str,
+) -> bool:
+    """判断相对评测目录的路径在指定历史快照中是否已经存在。"""
+
+    normalized_path = _normalize_path(path)
+    prefix = _normalize_path(repository_relative_path)
+
+    git_path = _normalize_path(f"{prefix}/{normalized_path}" if prefix else normalized_path)
+
+    if not git_path:
+        return False
+
+    completed = _run_git(
+        git_root,
+        (
+            "cat-file",
+            "-e",
+            f"{commit}:{git_path}",
+        ),
+        check=False,
+    )
+
+    return completed.returncode == 0
 
 
 def is_test_path(path: str) -> bool:
@@ -228,11 +308,11 @@ def build_evaluation_dataset(
     repository_path: str | Path,
     requested_ref: str = "HEAD",
     *,
-    sample_limit: int = DEFAULT_SAMPLE_LIMIT,
-    scan_limit: int = DEFAULT_SCAN_LIMIT,
-    min_changed_files: int = DEFAULT_MIN_CHANGED_FILES,
-    max_changed_files: int = DEFAULT_MAX_CHANGED_FILES,
-    min_message_length: int = DEFAULT_MIN_MESSAGE_LENGTH,
+    sample_limit: int = (DEFAULT_SAMPLE_LIMIT),
+    scan_limit: int = (DEFAULT_SCAN_LIMIT),
+    min_changed_files: int = (DEFAULT_MIN_CHANGED_FILES),
+    max_changed_files: int = (DEFAULT_MAX_CHANGED_FILES),
+    min_message_length: int = (DEFAULT_MIN_MESSAGE_LENGTH),
 ) -> EvaluationDataset:
     """按冻结规则从 Git 历史中提取评测样本。
 
@@ -264,11 +344,20 @@ def build_evaluation_dataset(
         raise NotADirectoryError(f"仓库路径不是目录：{resolved_repository}")
 
     git_root = _find_git_root(resolved_repository)
-    resolved_ref = _resolve_commit(git_root, requested_ref)
-    repository_relative_path, pathspec = _repository_scope(
+
+    resolved_ref = _resolve_commit(
+        git_root,
+        requested_ref,
+    )
+
+    (
+        repository_relative_path,
+        pathspec,
+    ) = _repository_scope(
         resolved_repository,
         git_root,
     )
+
     rows = _commit_rows(
         git_root,
         resolved_ref,
@@ -277,6 +366,7 @@ def build_evaluation_dataset(
     )
 
     samples: list[EvaluationSample] = []
+
     rejected_root_count = 0
     rejected_merge_count = 0
     rejected_short_message_count = 0
@@ -285,7 +375,8 @@ def build_evaluation_dataset(
     scanned_commit_count = 0
 
     for commit, parents in rows:
-        # 数据集达到上限后停止，避免把未真正筛选的历史算入 scanned。
+        # 数据集达到上限后停止，
+        # 避免把未真正筛选的历史算入 scanned。
         if len(samples) >= sample_limit:
             break
 
@@ -299,13 +390,17 @@ def build_evaluation_dataset(
             rejected_merge_count += 1
             continue
 
-        request_text = _commit_subject(git_root, commit)
+        request_text = _commit_subject(
+            git_root,
+            commit,
+        )
 
         if len(request_text) < min_message_length:
             rejected_short_message_count += 1
             continue
 
         analysis_commit = parents[0]
+
         changed_files = _changed_paths(
             git_root,
             analysis_commit,
@@ -313,40 +408,61 @@ def build_evaluation_dataset(
             repository_relative_path,
         )
 
-        if not min_changed_files <= len(changed_files) <= max_changed_files:
+        if not (min_changed_files <= len(changed_files) <= max_changed_files):
             rejected_file_count_count += 1
             continue
 
         test_files = tuple(path for path in changed_files if is_test_path(path))
+
         test_file_set = set(test_files)
+
         source_files = tuple(path for path in changed_files if path not in test_file_set)
 
         if not source_files:
             rejected_pure_test_count += 1
             continue
 
+        existing_source_files = tuple(
+            path
+            for path in source_files
+            if _path_exists_at_commit(
+                git_root,
+                analysis_commit,
+                repository_relative_path,
+                path,
+            )
+        )
+
+        existing_source_file_set = set(existing_source_files)
+
+        new_source_files = tuple(
+            path for path in source_files if path not in existing_source_file_set
+        )
+
         samples.append(
             EvaluationSample(
-                sample_id=f"git-{commit[:12]}",
-                repository_relative_path=repository_relative_path,
+                sample_id=(f"git-{commit[:12]}"),
+                repository_relative_path=(repository_relative_path),
                 request_text=request_text,
-                analysis_commit=analysis_commit,
+                analysis_commit=(analysis_commit),
                 answer_commit=commit,
-                changed_files=changed_files,
-                source_files=source_files,
+                changed_files=(changed_files),
+                source_files=(source_files),
                 test_files=test_files,
+                existing_source_files=(existing_source_files),
+                new_source_files=(new_source_files),
             )
         )
 
     return EvaluationDataset(
-        repository_relative_path=repository_relative_path,
-        requested_ref=requested_ref.strip(),
+        repository_relative_path=(repository_relative_path),
+        requested_ref=(requested_ref.strip()),
         resolved_ref=resolved_ref,
-        scanned_commit_count=scanned_commit_count,
+        scanned_commit_count=(scanned_commit_count),
         samples=tuple(samples),
-        rejected_root_count=rejected_root_count,
-        rejected_merge_count=rejected_merge_count,
-        rejected_short_message_count=rejected_short_message_count,
-        rejected_file_count_count=rejected_file_count_count,
-        rejected_pure_test_count=rejected_pure_test_count,
+        rejected_root_count=(rejected_root_count),
+        rejected_merge_count=(rejected_merge_count),
+        rejected_short_message_count=(rejected_short_message_count),
+        rejected_file_count_count=(rejected_file_count_count),
+        rejected_pure_test_count=(rejected_pure_test_count),
     )

@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-EvaluationRunStatus = Literal["success", "degraded", "failed"]
+EvaluationRunStatus = Literal[
+    "success",
+    "degraded",
+    "failed",
+]
 
 
 def _validate_unique_paths(
@@ -48,12 +52,27 @@ class EvaluationObservation:
             raise ValueError("sample_id 不能为空。")
 
         for field_name, paths in (
-            ("candidate_pool_paths", self.candidate_pool_paths),
-            ("selected_paths", self.selected_paths),
-            ("reported_paths", self.reported_paths),
-            ("invalid_reported_paths", self.invalid_reported_paths),
+            (
+                "candidate_pool_paths",
+                self.candidate_pool_paths,
+            ),
+            (
+                "selected_paths",
+                self.selected_paths,
+            ),
+            (
+                "reported_paths",
+                self.reported_paths,
+            ),
+            (
+                "invalid_reported_paths",
+                self.invalid_reported_paths,
+            ),
         ):
-            _validate_unique_paths(field_name, paths)
+            _validate_unique_paths(
+                field_name,
+                paths,
+            )
 
         if not set(self.selected_paths).issubset(self.candidate_pool_paths):
             raise ValueError("selected_paths 必须来自 candidate_pool_paths。")
@@ -86,9 +105,14 @@ class SampleEvaluationMetrics:
 
     sample_id: str
     status: EvaluationRunStatus
+    existing_file_recall_evaluable: bool
+    existing_source_file_count: int
+    new_source_file_count: int
     pool_recall_at_k: float
     file_recall_at_k: float
     hallucination_rate: float
+    hallucination_evaluable: bool
+    reported_path_count: int
     coverage_rate: float
     latency_ms: float
     token_count: int
@@ -108,11 +132,17 @@ class EvaluationMetricsReport:
     success_count: int
     degraded_count: int
     failed_count: int
+    existing_file_sample_count: int
+    new_file_sample_count: int
+    existing_source_file_count: int
+    new_source_file_count: int
     pool_k: int
     file_k: int
     pool_recall_at_k: float
     file_recall_at_k: float
     hallucination_rate: float
+    hallucination_evaluable: bool
+    reported_path_count: int
     failure_rate: float
     coverage_rate: float
     average_latency_ms: float

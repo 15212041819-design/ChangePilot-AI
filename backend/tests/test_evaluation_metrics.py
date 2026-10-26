@@ -29,8 +29,15 @@ def _sample(
         repository_relative_path="",
         request_text=(f"implement meaningful behavior for {sample_id}"),
         analysis_commit="a" * 40,
-        answer_commit=answer_character * 40,
-        changed_files=tuple(sorted((*source_files, *test_files))),
+        answer_commit=(answer_character * 40),
+        changed_files=tuple(
+            sorted(
+                (
+                    *source_files,
+                    *test_files,
+                )
+            )
+        ),
         source_files=tuple(sorted(source_files)),
         test_files=test_files,
     )
@@ -43,7 +50,10 @@ def _dataset() -> EvaluationDataset:
         _sample(
             "sample-1",
             "b",
-            ("app/a.py", "app/b.py"),
+            (
+                "app/a.py",
+                "app/b.py",
+            ),
         ),
         _sample(
             "sample-2",
@@ -113,24 +123,172 @@ def test_metrics_calculate_recall_hallucination_failure_and_coverage() -> None:
     )
 
     assert report.pool_recall_at_k == 0.5
+
     assert report.file_recall_at_k == 0.25
+
     assert report.hallucination_rate == pytest.approx(
         1 / 3,
         abs=1e-6,
     )
+
     assert report.failure_rate == 0.0
+
     assert report.coverage_rate == pytest.approx(
         5 / 6,
         abs=1e-6,
     )
+
     assert report.average_latency_ms == 200.0
+
     assert report.total_token_count == 40
+
+    assert report.existing_file_sample_count == 2
+
+    assert report.new_file_sample_count == 0
+
+    assert report.existing_source_file_count == 3
+
+    assert report.new_source_file_count == 0
+
+    assert report.reported_path_count == 3
+
+    assert report.hallucination_evaluable is True
+
     assert report.success_count == 1
+
     assert report.degraded_count == 1
+
     assert report.failed_count == 0
 
     assert report.samples[0].missing_truth_in_selection == ("app/b.py",)
+
     assert report.samples[1].missing_truth_in_pool == ("app/c.py",)
+
+
+def test_new_source_files_are_excluded_from_existing_file_recall() -> None:
+    """commit^ 中不存在的新文件不能把检索召回率压成零。"""
+
+    sample = EvaluationSample(
+        sample_id="sample-new-file",
+        repository_relative_path="",
+        request_text=("extend service and add audit module"),
+        analysis_commit="a" * 40,
+        answer_commit="b" * 40,
+        changed_files=(
+            "app/audit.py",
+            "app/service.py",
+        ),
+        source_files=(
+            "app/audit.py",
+            "app/service.py",
+        ),
+        test_files=(),
+        existing_source_files=("app/service.py",),
+        new_source_files=("app/audit.py",),
+    )
+
+    dataset = EvaluationDataset(
+        repository_relative_path="",
+        requested_ref="HEAD",
+        resolved_ref="c" * 40,
+        scanned_commit_count=1,
+        samples=(sample,),
+        rejected_root_count=0,
+        rejected_merge_count=0,
+        rejected_short_message_count=0,
+        rejected_file_count_count=0,
+        rejected_pure_test_count=0,
+    )
+
+    observation = EvaluationObservation(
+        sample_id=sample.sample_id,
+        status="success",
+        candidate_pool_paths=("app/service.py",),
+        selected_paths=("app/service.py",),
+        reported_paths=(),
+        invalid_reported_paths=(),
+        analyzed_item_count=1,
+        assigned_item_count=1,
+        latency_ms=10.0,
+    )
+
+    report = calculate_evaluation_metrics(
+        dataset,
+        (observation,),
+        experiment_name=("new-file-aware"),
+    )
+
+    assert report.pool_recall_at_k == 1.0
+
+    assert report.file_recall_at_k == 1.0
+
+    assert report.existing_file_sample_count == 1
+
+    assert report.new_file_sample_count == 1
+
+    assert report.existing_source_file_count == 1
+
+    assert report.new_source_file_count == 1
+
+    assert report.reported_path_count == 0
+
+    assert report.hallucination_evaluable is False
+
+
+def test_all_new_file_sample_is_not_a_recall_zero() -> None:
+    """纯新增源码样本应标记不可评估，而不是贡献一个虚假的零分。"""
+
+    sample = EvaluationSample(
+        sample_id="sample-all-new",
+        repository_relative_path="",
+        request_text=("add a new impact engine module"),
+        analysis_commit="a" * 40,
+        answer_commit="b" * 40,
+        changed_files=("app/impact.py",),
+        source_files=("app/impact.py",),
+        test_files=(),
+        existing_source_files=(),
+        new_source_files=("app/impact.py",),
+    )
+
+    dataset = EvaluationDataset(
+        repository_relative_path="",
+        requested_ref="HEAD",
+        resolved_ref="c" * 40,
+        scanned_commit_count=1,
+        samples=(sample,),
+        rejected_root_count=0,
+        rejected_merge_count=0,
+        rejected_short_message_count=0,
+        rejected_file_count_count=0,
+        rejected_pure_test_count=0,
+    )
+
+    observation = EvaluationObservation(
+        sample_id=sample.sample_id,
+        status="success",
+        candidate_pool_paths=(),
+        selected_paths=(),
+        reported_paths=(),
+        invalid_reported_paths=(),
+        analyzed_item_count=0,
+        assigned_item_count=0,
+        latency_ms=1.0,
+    )
+
+    report = calculate_evaluation_metrics(
+        dataset,
+        (observation,),
+        experiment_name=("all-new-file"),
+    )
+
+    assert report.existing_file_sample_count == 0
+
+    assert report.pool_recall_at_k == 0.0
+
+    assert report.file_recall_at_k == 0.0
+
+    assert report.samples[0].existing_file_recall_evaluable is False
 
 
 def test_missing_observation_is_counted_as_failure() -> None:
@@ -164,9 +322,13 @@ def test_missing_observation_is_counted_as_failure() -> None:
     )
 
     assert report.observed_sample_count == 1
+
     assert report.failed_count == 1
+
     assert report.failure_rate == 0.5
+
     assert report.pool_recall_at_k == 0.5
+
     assert report.samples[1].error == "missing_observation"
 
 
@@ -219,6 +381,7 @@ def test_recall_respects_pool_and_file_cutoffs() -> None:
     )
 
     assert report.pool_recall_at_k == 0.0
+
     assert report.file_recall_at_k == 0.0
 
 
@@ -243,8 +406,11 @@ def test_metrics_reject_duplicate_observations() -> None:
     ):
         calculate_evaluation_metrics(
             _dataset(),
-            (observation, observation),
-            experiment_name="duplicate-test",
+            (
+                observation,
+                observation,
+            ),
+            experiment_name=("duplicate-test"),
         )
 
 
@@ -270,7 +436,7 @@ def test_metrics_reject_unknown_sample() -> None:
         calculate_evaluation_metrics(
             _dataset(),
             (observation,),
-            experiment_name="unknown-test",
+            experiment_name=("unknown-test"),
         )
 
 

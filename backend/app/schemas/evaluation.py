@@ -22,6 +22,8 @@ class EvaluationSample:
     changed_files: tuple[str, ...]
     source_files: tuple[str, ...]
     test_files: tuple[str, ...]
+    existing_source_files: tuple[str, ...] = ()
+    new_source_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """在构造期阻止不完整或自相矛盾的评测样本。"""
@@ -56,6 +58,22 @@ class EvaluationSample:
         if tuple(sorted(set(self.test_files))) != self.test_files:
             raise ValueError("test_files 必须去重并稳定排序。")
 
+        if tuple(sorted(set(self.existing_source_files))) != self.existing_source_files:
+            raise ValueError("existing_source_files 必须去重并稳定排序。")
+
+        if tuple(sorted(set(self.new_source_files))) != self.new_source_files:
+            raise ValueError("new_source_files 必须去重并稳定排序。")
+
+        # 兼容契约升级前由测试或第三方代码手工构造的样本。
+        # 真实 Git 数据集必须显式传入 existing/new 分类；
+        # 旧调用未分类时，保守地把 source_files 视为既有文件。
+        if self.source_files and not self.existing_source_files and not self.new_source_files:
+            object.__setattr__(
+                self,
+                "existing_source_files",
+                self.source_files,
+            )
+
         changed = set(self.changed_files)
 
         if set(self.source_files) | set(self.test_files) != changed:
@@ -63,6 +81,17 @@ class EvaluationSample:
 
         if set(self.source_files) & set(self.test_files):
             raise ValueError("同一路径不能同时属于 source_files 和 test_files。")
+
+        existing = set(self.existing_source_files)
+        new = set(self.new_source_files)
+
+        if existing & new:
+            raise ValueError("源码路径不能同时属于既有文件和新增文件。")
+
+        if existing | new != set(self.source_files):
+            raise ValueError(
+                "existing_source_files 与 new_source_files 必须完整划分 source_files。"
+            )
 
 
 @dataclass(frozen=True)
