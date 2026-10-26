@@ -6,8 +6,13 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from app.schemas.evaluation_metrics import (
+    CandidateScoreTrace,
+    CandidateSignalName,
+    CandidateSignalTrace,
+)
 from app.schemas.ranking_diagnostics import (
     RankingDiagnosticsReport,
     SampleRankingDiagnostic,
@@ -19,11 +24,7 @@ class RankingDiagnosticsError(ValueError):
     """评测报告缺少生成可信排序诊断所需的事实。"""
 
 
-def _mapping(
-    value: object,
-    *,
-    field_name: str,
-) -> Mapping[str, Any]:
+def _mapping(value: object, *, field_name: str) -> Mapping[str, Any]:
     """读取必需的 JSON 对象。"""
 
     if not isinstance(value, Mapping):
@@ -39,17 +40,16 @@ def _sequence(
 ) -> Sequence[object]:
     """读取必需的 JSON 数组。"""
 
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes),
+    ):
         raise RankingDiagnosticsError(f"{field_name} 必须是 JSON 数组。")
 
     return value
 
 
-def _string(
-    value: object,
-    *,
-    field_name: str,
-) -> str:
+def _string(value: object, *, field_name: str) -> str:
     """读取必需的非空字符串。"""
 
     if not isinstance(value, str) or not value.strip():
@@ -58,17 +58,25 @@ def _string(
     return value.strip()
 
 
-def _integer(
-    value: object,
-    *,
-    field_name: str,
-) -> int:
+def _integer(value: object, *, field_name: str) -> int:
     """读取整数并拒绝 bool。"""
 
     if isinstance(value, bool) or not isinstance(value, int):
         raise RankingDiagnosticsError(f"{field_name} 必须是整数。")
 
     return value
+
+
+def _number(value: object, *, field_name: str) -> float:
+    """读取评分数字并拒绝 bool。"""
+
+    if isinstance(value, bool) or not isinstance(
+        value,
+        (int, float),
+    ):
+        raise RankingDiagnosticsError(f"{field_name} 必须是数字。")
+
+    return float(value)
 
 
 def _paths(
@@ -80,12 +88,7 @@ def _paths(
 
     paths: list[str] = []
 
-    for index, item in enumerate(
-        _sequence(
-            value,
-            field_name=field_name,
-        )
-    ):
+    for index, item in enumerate(_sequence(value, field_name=field_name)):
         if not isinstance(item, str) or not item.strip():
             raise RankingDiagnosticsError(f"{field_name}[{index}] 必须是非空字符串。")
 
@@ -97,19 +100,104 @@ def _paths(
     return tuple(paths)
 
 
-def _ratio(
-    numerator: int,
-    denominator: int,
-) -> float:
+def _score_traces(
+    observation: Mapping[str, Any] | None,
+    pool_paths: tuple[str, ...],
+) -> tuple[CandidateScoreTrace, ...]:
+    """读取并验证候选评分轨迹；旧报告没有该字段时返回空元组。"""
+
+    if observation is None:
+        return ()
+
+    raw_traces = _sequence(
+        observation.get("candidate_score_traces", ()),
+        field_name="candidate_score_traces",
+    )
+    allowed_names = {
+        "keyword",
+        "symbol",
+        "dep_closure",
+        "cochange",
+        "testmap",
+    }
+    traces: list[CandidateScoreTrace] = []
+
+    for trace_index, raw_trace in enumerate(raw_traces):
+        prefix = f"candidate_score_traces[{trace_index}]"
+        trace = _mapping(
+            raw_trace,
+            field_name=prefix,
+        )
+        signal_models: list[CandidateSignalTrace] = []
+
+        for signal_index, raw_signal in enumerate(
+            _sequence(
+                trace.get("signals"),
+                field_name=f"{prefix}.signals",
+            )
+        ):
+            signal_prefix = f"{prefix}.signals[{signal_index}]"
+            signal = _mapping(
+                raw_signal,
+                field_name=signal_prefix,
+            )
+            name = _string(
+                signal.get("name"),
+                field_name=f"{signal_prefix}.name",
+            )
+
+            if name not in allowed_names:
+                raise RankingDiagnosticsError(f"{signal_prefix}.name 非法：{name}")
+
+            signal_models.append(
+                CandidateSignalTrace(
+                    name=cast(CandidateSignalName, name),
+                    value=_number(
+                        signal.get("value"),
+                        field_name=f"{signal_prefix}.value",
+                    ),
+                )
+            )
+
+        traces.append(
+            CandidateScoreTrace(
+                path=_string(
+                    trace.get("path"),
+                    field_name=f"{prefix}.path",
+                ),
+                pool_rank=_integer(
+                    trace.get("pool_rank"),
+                    field_name=f"{prefix}.pool_rank",
+                ),
+                total_score=_number(
+                    trace.get("total_score"),
+                    field_name=f"{prefix}.total_score",
+                ),
+                signals=tuple(signal_models),
+            )
+        )
+
+    result = tuple(traces)
+
+    if result:
+        if tuple(trace.path for trace in result) != pool_paths:
+            raise RankingDiagnosticsError(
+                "candidate_score_traces 必须逐项对应 candidate_pool_paths。"
+            )
+
+        if tuple(trace.pool_rank for trace in result) != tuple(range(1, len(result) + 1)):
+            raise RankingDiagnosticsError("候选评分轨迹排名必须从 1 连续递增。")
+
+    return result
+
+
+def _ratio(numerator: int, denominator: int) -> float:
     """返回稳定的六位小数比例。"""
 
     if denominator == 0:
         return 0.0
 
-    return round(
-        numerator / denominator,
-        6,
-    )
+    return round(numerator / denominator, 6)
 
 
 def load_ranking_source(
@@ -156,24 +244,21 @@ def _index_observations(
 ) -> dict[str, Mapping[str, Any]]:
     """按 sample_id 索引 observation 并拒绝重复。"""
 
-    indexed: dict[
-        str,
-        Mapping[str, Any],
-    ] = {}
+    indexed: dict[str, Mapping[str, Any]] = {}
 
-    raw_observations = _sequence(
-        payload.get("observations"),
-        field_name="observations",
-    )
-
-    for index, raw in enumerate(raw_observations):
+    for index, raw in enumerate(
+        _sequence(
+            payload.get("observations"),
+            field_name="observations",
+        )
+    ):
         item = _mapping(
             raw,
-            field_name=(f"observations[{index}]"),
+            field_name=f"observations[{index}]",
         )
         sample_id = _string(
             item.get("sample_id"),
-            field_name=(f"observations[{index}].sample_id"),
+            field_name=f"observations[{index}].sample_id",
         )
 
         if sample_id in indexed:
@@ -208,7 +293,7 @@ def _sample_diagnostic(
 
     sample = _mapping(
         raw_sample,
-        field_name=(f"dataset.samples[{index}]"),
+        field_name=f"dataset.samples[{index}]",
     )
     prefix = f"dataset.samples[{index}]"
 
@@ -219,11 +304,11 @@ def _sample_diagnostic(
 
     truth = _paths(
         sample.get("existing_source_files"),
-        field_name=(f"{prefix}.existing_source_files"),
+        field_name=f"{prefix}.existing_source_files",
     )
     new_files = _paths(
         sample.get("new_source_files"),
-        field_name=(f"{prefix}.new_source_files"),
+        field_name=f"{prefix}.new_source_files",
     )
 
     if observation is None:
@@ -232,61 +317,70 @@ def _sample_diagnostic(
     else:
         pool_paths = _paths(
             observation.get("candidate_pool_paths"),
-            field_name=("candidate_pool_paths"),
+            field_name="candidate_pool_paths",
         )
         selected_paths = _paths(
             observation.get("selected_paths"),
             field_name="selected_paths",
         )
 
+    score_traces = _score_traces(
+        observation,
+        pool_paths,
+    )
+    traces_by_path = {trace.path: trace for trace in score_traces}
+
     pool_cutoff = pool_paths[:pool_k]
     selection_cutoff = selected_paths[:file_k]
-
     truth_set = set(truth)
     pool_set = set(pool_cutoff)
     selected_set = set(selection_cutoff)
+    rankings: list[TruthPathRanking] = []
 
-    rankings = tuple(
-        TruthPathRanking(
-            path=path,
-            pool_rank=_rank(
-                path,
-                pool_paths,
-            ),
-            within_pool_cutoff=(path in pool_set),
-            selection_rank=_rank(
-                path,
-                selection_cutoff,
-            ),
+    for path in truth:
+        score_trace = traces_by_path.get(path)
+
+        rankings.append(
+            TruthPathRanking(
+                path=path,
+                pool_rank=_rank(path, pool_paths),
+                within_pool_cutoff=path in pool_set,
+                selection_rank=_rank(
+                    path,
+                    selection_cutoff,
+                ),
+                total_score=(score_trace.total_score if score_trace else None),
+                signals=(score_trace.signals if score_trace else ()),
+            )
         )
-        for path in truth
-    )
 
     missing_from_pool = tuple(path for path in truth if path not in pool_set)
     missed_after_ranking = tuple(
-        path for path in truth if (path in pool_set and path not in selected_set)
+        path for path in truth if path in pool_set and path not in selected_set
     )
     false_positives = tuple(path for path in selection_cutoff if path not in truth_set)
-
+    false_positive_score_traces = tuple(
+        traces_by_path[path] for path in false_positives if path in traces_by_path
+    )
     pool_hits = len(truth_set & pool_set)
     selection_hits = len(truth_set & selected_set)
 
     return SampleRankingDiagnostic(
         sample_id=_string(
             sample.get("sample_id"),
-            field_name=(f"{prefix}.sample_id"),
+            field_name=f"{prefix}.sample_id",
         ),
         request_text=_string(
             sample.get("request_text"),
-            field_name=(f"{prefix}.request_text"),
+            field_name=f"{prefix}.request_text",
         ),
         analysis_commit=_string(
             sample.get("analysis_commit"),
-            field_name=(f"{prefix}.analysis_commit"),
+            field_name=f"{prefix}.analysis_commit",
         ),
         answer_commit=_string(
             sample.get("answer_commit"),
-            field_name=(f"{prefix}.answer_commit"),
+            field_name=f"{prefix}.answer_commit",
         ),
         evaluable=bool(truth),
         existing_truth_count=len(truth),
@@ -301,10 +395,12 @@ def _sample_diagnostic(
             selection_hits,
             len(truth),
         ),
-        truth_rankings=rankings,
-        missing_from_pool=(missing_from_pool),
-        missed_after_ranking=(missed_after_ranking),
-        false_positive_selections=(false_positives),
+        truth_rankings=tuple(rankings),
+        missing_from_pool=missing_from_pool,
+        missed_after_ranking=missed_after_ranking,
+        false_positive_selections=false_positives,
+        score_trace_available=bool(score_traces),
+        false_positive_score_traces=(false_positive_score_traces),
     )
 
 
@@ -325,7 +421,6 @@ def build_ranking_diagnostics(
         payload.get("metrics"),
         field_name="metrics",
     )
-
     resolved_pool_k = pool_k or _integer(
         metrics.get("pool_k"),
         field_name="metrics.pool_k",
@@ -342,19 +437,19 @@ def build_ranking_diagnostics(
     diagnostics: list[SampleRankingDiagnostic] = []
     known_ids: set[str] = set()
 
-    raw_samples = _sequence(
-        dataset.get("samples"),
-        field_name="dataset.samples",
-    )
-
-    for index, raw_sample in enumerate(raw_samples):
+    for index, raw_sample in enumerate(
+        _sequence(
+            dataset.get("samples"),
+            field_name="dataset.samples",
+        )
+    ):
         sample = _mapping(
             raw_sample,
-            field_name=(f"dataset.samples[{index}]"),
+            field_name=f"dataset.samples[{index}]",
         )
         sample_id = _string(
             sample.get("sample_id"),
-            field_name=(f"dataset.samples[{index}].sample_id"),
+            field_name=f"dataset.samples[{index}].sample_id",
         )
 
         if sample_id in known_ids:
@@ -394,12 +489,13 @@ def build_ranking_diagnostics(
         file_k=resolved_file_k,
         sample_count=len(diagnostics),
         evaluable_sample_count=len(evaluable),
+        score_trace_sample_count=sum(item.score_trace_available for item in diagnostics),
         perfect_selection_sample_count=sum(item.selection_recall == 1.0 for item in evaluable),
-        existing_truth_count=(existing_truth_count),
+        existing_truth_count=existing_truth_count,
         pool_hit_count=pool_hit_count,
-        selected_hit_count=(selected_hit_count),
-        missing_from_pool_count=(missing_pool_count),
-        missed_after_ranking_count=(missed_ranking_count),
+        selected_hit_count=selected_hit_count,
+        missing_from_pool_count=missing_pool_count,
+        missed_after_ranking_count=missed_ranking_count,
         false_positive_selected_count=sum(
             len(item.false_positive_selections) for item in diagnostics
         ),

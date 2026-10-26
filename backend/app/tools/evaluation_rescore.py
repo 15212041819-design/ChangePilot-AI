@@ -15,6 +15,9 @@ from typing import Any, cast
 
 from app.schemas.evaluation import EvaluationDataset, EvaluationSample
 from app.schemas.evaluation_metrics import (
+    CandidateScoreTrace,
+    CandidateSignalName,
+    CandidateSignalTrace,
     EvaluationObservation,
     EvaluationRunStatus,
 )
@@ -64,6 +67,15 @@ def _integer(value: object, *, field_name: str) -> int:
     return value
 
 
+def _number(value: object, *, field_name: str) -> float:
+    """读取浮点分数并拒绝 bool。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvaluationRescoreError(f"{field_name} 必须是数字。")
+
+    return float(value)
+
+
 def _path_tuple(value: object, *, field_name: str) -> tuple[str, ...]:
     """把 JSON 路径数组转换成不可变元组。"""
 
@@ -73,10 +85,68 @@ def _path_tuple(value: object, *, field_name: str) -> tuple[str, ...]:
     for index, item in enumerate(items):
         if not isinstance(item, str) or not item.strip():
             raise EvaluationRescoreError(f"{field_name}[{index}] 必须是非空字符串。")
-
         paths.append(item)
 
     return tuple(paths)
+
+
+def _candidate_score_traces(
+    value: object,
+    *,
+    field_name: str,
+) -> tuple[CandidateScoreTrace, ...]:
+    """恢复可选的候选评分轨迹；旧报告缺失该字段时返回空元组。"""
+
+    traces: list[CandidateScoreTrace] = []
+    allowed_names = {
+        "keyword",
+        "symbol",
+        "dep_closure",
+        "cochange",
+        "testmap",
+    }
+
+    for trace_index, raw_trace in enumerate(_sequence(value, field_name=field_name)):
+        trace_prefix = f"{field_name}[{trace_index}]"
+        trace = _mapping(raw_trace, field_name=trace_prefix)
+        signal_models: list[CandidateSignalTrace] = []
+
+        for signal_index, raw_signal in enumerate(
+            _sequence(trace.get("signals"), field_name=f"{trace_prefix}.signals")
+        ):
+            signal_prefix = f"{trace_prefix}.signals[{signal_index}]"
+            signal = _mapping(raw_signal, field_name=signal_prefix)
+            name = _string(signal.get("name"), field_name=f"{signal_prefix}.name")
+
+            if name not in allowed_names:
+                raise EvaluationRescoreError(f"{signal_prefix}.name 非法：{name}")
+
+            signal_models.append(
+                CandidateSignalTrace(
+                    name=cast(CandidateSignalName, name),
+                    value=_number(
+                        signal.get("value"),
+                        field_name=f"{signal_prefix}.value",
+                    ),
+                )
+            )
+
+        traces.append(
+            CandidateScoreTrace(
+                path=_string(trace.get("path"), field_name=f"{trace_prefix}.path"),
+                pool_rank=_integer(
+                    trace.get("pool_rank"),
+                    field_name=f"{trace_prefix}.pool_rank",
+                ),
+                total_score=_number(
+                    trace.get("total_score"),
+                    field_name=f"{trace_prefix}.total_score",
+                ),
+                signals=tuple(signal_models),
+            )
+        )
+
+    return tuple(traces)
 
 
 def load_evaluation_report(report_path: str | Path) -> dict[str, Any]:
@@ -104,8 +174,7 @@ def load_evaluation_report(report_path: str | Path) -> dict[str, Any]:
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise EvaluationRescoreError(
             "不支持的评测报告版本："
-            f"{schema_version}；"
-            f"支持版本为 {sorted(SUPPORTED_SCHEMA_VERSIONS)}。"
+            f"{schema_version}；支持版本为 {sorted(SUPPORTED_SCHEMA_VERSIONS)}。"
         )
 
     _mapping(payload.get("dataset"), field_name="dataset")
@@ -131,20 +200,14 @@ def _observation_from_payload(
     if error is not None and not isinstance(error, str):
         raise EvaluationRescoreError(f"{prefix}.error 必须是字符串或 null。")
 
-    status = _string(
-        item.get("status"),
-        field_name=f"{prefix}.status",
-    )
+    status = _string(item.get("status"), field_name=f"{prefix}.status")
 
     if status not in {"success", "degraded", "failed"}:
         raise EvaluationRescoreError(f"{prefix}.status 非法：{status}")
 
     latency = item.get("latency_ms")
 
-    if isinstance(latency, bool) or not isinstance(
-        latency,
-        (int, float),
-    ):
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)):
         raise EvaluationRescoreError(f"{prefix}.latency_ms 必须是数字。")
 
     return EvaluationObservation(
@@ -183,6 +246,10 @@ def _observation_from_payload(
             field_name=f"{prefix}.token_count",
         ),
         error=error,
+        candidate_score_traces=_candidate_score_traces(
+            item.get("candidate_score_traces", ()),
+            field_name=f"{prefix}.candidate_score_traces",
+        ),
     )
 
 
@@ -237,14 +304,10 @@ def _validate_sample_identity(
                 f"样本 {rebuilt.sample_id} 的 {field_name} 与旧报告不一致。"
             )
 
-    for field_name in (
-        "changed_files",
-        "source_files",
-        "test_files",
-    ):
+    for field_name in ("changed_files", "source_files", "test_files"):
         old_paths = _path_tuple(
             old.get(field_name),
-            field_name=(f"dataset.samples[{rebuilt.sample_id}].{field_name}"),
+            field_name=f"dataset.samples[{rebuilt.sample_id}].{field_name}",
         )
         new_paths = getattr(rebuilt, field_name)
 
@@ -282,10 +345,7 @@ def rebuild_report_dataset(
         repository_path,
         requested_ref=resolved_ref,
         sample_limit=sample_count,
-        scan_limit=max(
-            scanned_commit_count,
-            sample_count,
-        ),
+        scan_limit=max(scanned_commit_count, sample_count),
     )
 
     rebuilt_ids = tuple(sample.sample_id for sample in rebuilt.samples)
@@ -316,20 +376,13 @@ def rescore_evaluation_report(
     """复用历史 observation，以当前指标口径生成新版报告。"""
 
     payload = load_evaluation_report(report_path)
-    dataset = rebuild_report_dataset(
-        repository_path,
-        payload,
-    )
+    dataset = rebuild_report_dataset(repository_path, payload)
     raw_observations = _sequence(
         payload.get("observations"),
         field_name="observations",
     )
     observations = tuple(
-        _observation_from_payload(
-            item,
-            index=index,
-        )
-        for index, item in enumerate(raw_observations)
+        _observation_from_payload(item, index=index) for index, item in enumerate(raw_observations)
     )
     old_metrics = _mapping(
         payload.get("metrics"),
@@ -352,7 +405,6 @@ def rescore_evaluation_report(
         if experiment_name is not None and experiment_name.strip()
         else f"{source_experiment}-rescored"
     )
-
     metrics = calculate_evaluation_metrics(
         dataset,
         observations,
@@ -377,9 +429,8 @@ def rescore_evaluation_report(
         "metrics": asdict(metrics),
     }
 
-    # dataclass 中的 tuple 在 JSON 中会变成 list。
-    # 这里提前进行 JSON 规范化，保证 Python 返回值
-    # 与最终写入磁盘的内容完全一致。
+    # dataclass 中的 tuple 在 JSON 中会变成 list。这里提前做一次 JSON
+    # 规范化，保证 Python 调用方拿到的返回值与最终写入磁盘的内容一致。
     return json.loads(
         json.dumps(
             rescored_payload,
@@ -410,10 +461,7 @@ def write_rescored_report(
     if resolved_output.exists() and resolved_output.is_dir():
         raise IsADirectoryError(f"重新计分报告路径是目录：{resolved_output}")
 
-    resolved_output.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(
         dict(payload),
         ensure_ascii=False,

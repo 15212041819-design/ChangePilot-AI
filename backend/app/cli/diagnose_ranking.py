@@ -47,14 +47,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--worst-limit",
         type=int,
         default=5,
-        help=("终端最多显示多少条最差样本，默认 5。"),
+        help="终端最多显示多少条最差样本，默认 5。",
     )
     return parser
 
 
-def _default_output(
-    source: Path,
-) -> Path:
+def _default_output(source: Path) -> Path:
     """生成独立的默认诊断文件名。"""
 
     return source.with_name(f"{source.stem}-ranking-diagnostics.json")
@@ -62,11 +60,7 @@ def _default_output(
 
 def run_diagnostics_cli(
     argv: Sequence[str] | None = None,
-) -> tuple[
-    RankingDiagnosticsReport,
-    Path,
-    int,
-]:
+) -> tuple[RankingDiagnosticsReport, Path, int]:
     """生成诊断并保存 JSON。"""
 
     args = build_argument_parser().parse_args(argv)
@@ -79,15 +73,10 @@ def run_diagnostics_cli(
         value = getattr(args, name)
 
         if value is not None and value <= 0:
-            option = name.replace(
-                "_",
-                "-",
-            )
-            raise ValueError(f"--{option} 必须大于 0。")
+            raise ValueError(f"--{name.replace('_', '-')} 必须大于 0。")
 
     source = args.report.expanduser().resolve()
     output = args.output.expanduser().resolve() if args.output else _default_output(source)
-
     report = build_ranking_diagnostics(
         source,
         pool_k=args.pool_k,
@@ -97,11 +86,7 @@ def run_diagnostics_cli(
         report,
         output,
     )
-    return (
-        report,
-        written,
-        args.worst_limit,
-    )
+    return report, written, args.worst_limit
 
 
 def _print_summary(
@@ -114,6 +99,7 @@ def _print_summary(
     print(f"experiment: {report.experiment_name}")
     print(f"samples: {report.sample_count}")
     print(f"evaluable_samples: {report.evaluable_sample_count}")
+    print(f"score_trace_samples: {report.score_trace_sample_count}")
     print(f"existing_truth_files: {report.existing_truth_count}")
     print(f"pool_recall_micro@{report.pool_k}: {report.pool_recall_micro:.3f}")
     print(f"selection_recall_micro@{report.file_k}: {report.selection_recall_micro:.3f}")
@@ -136,11 +122,38 @@ def _print_summary(
             "worst_sample: "
             f"{item.sample_id} "
             f"recall={item.selection_recall:.3f} "
-            "pool_missing="
-            f"{list(item.missing_from_pool)} "
-            "ranking_missing="
-            f"{list(item.missed_after_ranking)}"
+            f"pool_missing={list(item.missing_from_pool)} "
+            f"ranking_missing={list(item.missed_after_ranking)}"
         )
+
+        if not item.score_trace_available:
+            print("  score_evidence: unavailable (legacy report)")
+            continue
+
+        missed_paths = set(item.missed_after_ranking)
+
+        for truth in item.truth_rankings:
+            if truth.path not in missed_paths:
+                continue
+
+            signal_values = {signal.name: signal.value for signal in truth.signals}
+            print(
+                "  missed_truth: "
+                f"{truth.path} "
+                f"rank={truth.pool_rank} "
+                f"score={truth.total_score} "
+                f"signals={signal_values}"
+            )
+
+        for trace in item.false_positive_score_traces[:3]:
+            signal_values = {signal.name: signal.value for signal in trace.signals}
+            print(
+                "  selected_false_positive: "
+                f"{trace.path} "
+                f"rank={trace.pool_rank} "
+                f"score={trace.total_score} "
+                f"signals={signal_values}"
+            )
 
     print(f"output: {output}")
 
@@ -151,13 +164,9 @@ def main(
     """命令行入口。"""
 
     try:
-        (
-            report,
-            output,
-            worst_limit,
-        ) = run_diagnostics_cli(argv)
+        report, output, worst_limit = run_diagnostics_cli(argv)
     except Exception as exc:  # noqa: BLE001
-        # CLI 顶层统一转换错误和退出码。
+        # CLI 必须把错误转换成稳定的非零退出码。
         print(
             f"ranking diagnostics failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,

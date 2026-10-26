@@ -37,11 +37,13 @@ def _report(path: Path) -> None:
                 },
                 {
                     "sample_id": "sample-2",
-                    "request_text": ("add audit module"),
+                    "request_text": "add audit module",
                     "analysis_commit": "b" * 40,
                     "answer_commit": "c" * 40,
                     "existing_source_files": [],
-                    "new_source_files": ["app/audit.py"],
+                    "new_source_files": [
+                        "app/audit.py",
+                    ],
                 },
             ]
         },
@@ -57,11 +59,61 @@ def _report(path: Path) -> None:
                     "app/service.py",
                     "app/unrelated.py",
                 ],
+                "candidate_score_traces": [
+                    {
+                        "path": "app/service.py",
+                        "pool_rank": 1,
+                        "total_score": 4.0,
+                        "signals": [
+                            {
+                                "name": "symbol",
+                                "value": 4.0,
+                            },
+                        ],
+                    },
+                    {
+                        "path": "app/unrelated.py",
+                        "pool_rank": 2,
+                        "total_score": 2.0,
+                        "signals": [
+                            {
+                                "name": "keyword",
+                                "value": 2.0,
+                            },
+                        ],
+                    },
+                    {
+                        "path": "app/model.py",
+                        "pool_rank": 3,
+                        "total_score": 1.0,
+                        "signals": [
+                            {
+                                "name": "dep_closure",
+                                "value": 1.0,
+                            },
+                        ],
+                    },
+                ],
             },
             {
                 "sample_id": "sample-2",
-                "candidate_pool_paths": ["app/service.py"],
+                "candidate_pool_paths": [
+                    "app/service.py",
+                ],
                 "selected_paths": [],
+                "candidate_score_traces": [
+                    {
+                        "path": "app/service.py",
+                        "pool_rank": 1,
+                        "total_score": 1.0,
+                        "signals": [
+                            {
+                                "name": "dep_closure",
+                                "value": 1.0,
+                            },
+                        ],
+                    }
+                ],
             },
         ],
         "metrics": {
@@ -69,7 +121,6 @@ def _report(path: Path) -> None:
             "file_k": 12,
         },
     }
-
     path.write_text(
         json.dumps(payload),
         encoding="utf-8",
@@ -95,10 +146,16 @@ def test_build_ranking_diagnostics_separates_pool_and_ranking_misses(
     assert report.missing_from_pool_count == 0
     assert report.missed_after_ranking_count == 1
     assert report.false_positive_selected_count == 1
+    assert report.score_trace_sample_count == 2
+
     assert first.missed_after_ranking == ("app/model.py",)
     assert first.false_positive_selections == ("app/unrelated.py",)
     assert first.truth_rankings[0].pool_rank == 3
     assert first.truth_rankings[0].selection_rank is None
+    assert first.truth_rankings[0].total_score == 1.0
+    assert first.truth_rankings[0].signals[0].name == "dep_closure"
+    assert first.false_positive_score_traces[0].path == "app/unrelated.py"
+    assert first.false_positive_score_traces[0].total_score == 2.0
 
 
 def test_pool_cutoff_can_expose_retrieval_miss(
@@ -152,11 +209,7 @@ def test_cli_writes_json_and_rejects_source_overwrite(
     output = tmp_path / "diagnostics.json"
     _report(source)
 
-    (
-        report,
-        written,
-        limit,
-    ) = run_diagnostics_cli(
+    report, written, limit = run_diagnostics_cli(
         (
             str(source),
             "--output",
@@ -168,9 +221,7 @@ def test_cli_writes_json_and_rejects_source_overwrite(
 
     assert written == output.resolve()
     assert limit == 3
-
-    saved = json.loads(output.read_text(encoding="utf-8"))
-    assert saved["selected_hit_count"] == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["selected_hit_count"] == 1
 
     with pytest.raises(
         ValueError,

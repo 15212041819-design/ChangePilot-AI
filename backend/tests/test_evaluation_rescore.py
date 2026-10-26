@@ -7,16 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from app.cli.rescore import (
-    main,
-    run_rescore_cli,
-)
-from app.schemas.evaluation_metrics import (
-    EvaluationObservation,
-)
-from app.tools.evaluation_dataset import (
-    build_evaluation_dataset,
-)
+from app.cli.rescore import main, run_rescore_cli
+from app.schemas.evaluation_metrics import EvaluationObservation
+from app.tools.evaluation_dataset import build_evaluation_dataset
 from app.tools.evaluation_rescore import (
     EvaluationRescoreError,
     rescore_evaluation_report,
@@ -24,19 +17,11 @@ from app.tools.evaluation_rescore import (
 )
 
 
-def _git(
-    repository: Path,
-    *arguments: str,
-) -> str:
+def _git(repository: Path, *arguments: str) -> str:
     """在临时仓库中执行 Git。"""
 
     completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            *arguments,
-        ],
+        ["git", "-C", str(repository), *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -64,21 +49,12 @@ def _commit(
         )
 
     _git(repository, "add", ".")
-    _git(
-        repository,
-        "commit",
-        "-m",
-        message,
-    )
-    return _git(
-        repository,
-        "rev-parse",
-        "HEAD",
-    )
+    _git(repository, "commit", "-m", message)
+    return _git(repository, "rev-parse", "HEAD")
 
 
 def _repository(tmp_path: Path) -> Path:
-    """创建包含既有文件修改和新增文件的历史样本。"""
+    """创建同时包含既有文件修改和新增文件的历史样本。"""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -129,7 +105,6 @@ def _old_report(
     sample = dataset.samples[0]
     dataset_payload = asdict(dataset)
 
-    # 模拟旧版报告：旧版还没有这两个字段。
     for item in dataset_payload["samples"]:
         item.pop("existing_source_files")
         item.pop("new_source_files")
@@ -176,10 +151,7 @@ def test_rescore_reuses_observations_and_corrects_new_file_denominator(
 
     repository = _repository(tmp_path)
     report_path = tmp_path / "old.json"
-    _old_report(
-        repository,
-        report_path,
-    )
+    _old_report(repository, report_path)
 
     payload = rescore_evaluation_report(
         report_path,
@@ -205,10 +177,7 @@ def test_rescore_cli_writes_new_file_without_overwriting_source(
     repository = _repository(tmp_path)
     report_path = tmp_path / "old.json"
     output_path = tmp_path / "new.json"
-    _old_report(
-        repository,
-        report_path,
-    )
+    _old_report(repository, report_path)
     original = report_path.read_text(encoding="utf-8")
 
     payload, written = run_rescore_cli(
@@ -233,10 +202,7 @@ def test_rescore_rejects_mismatched_sample_identity(
 
     repository = _repository(tmp_path)
     report_path = tmp_path / "old.json"
-    _old_report(
-        repository,
-        report_path,
-    )
+    _old_report(repository, report_path)
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     payload["dataset"]["samples"][0]["request_text"] = "tampered request"
     report_path.write_text(
@@ -254,6 +220,47 @@ def test_rescore_rejects_mismatched_sample_identity(
         )
 
 
+def test_rescore_preserves_candidate_score_traces(
+    tmp_path: Path,
+) -> None:
+    """新版报告的候选评分证据必须穿过离线重算。"""
+
+    repository = _repository(tmp_path)
+    report_path = tmp_path / "old.json"
+    _old_report(repository, report_path)
+
+    source = json.loads(report_path.read_text(encoding="utf-8"))
+    source["observations"][0]["candidate_score_traces"] = [
+        {
+            "path": "app/service.py",
+            "pool_rank": 1,
+            "total_score": 3.5,
+            "signals": [
+                {
+                    "name": "keyword",
+                    "value": 1.5,
+                },
+                {
+                    "name": "symbol",
+                    "value": 2.0,
+                },
+            ],
+        }
+    ]
+    report_path.write_text(
+        json.dumps(source),
+        encoding="utf-8",
+    )
+
+    payload = rescore_evaluation_report(
+        report_path,
+        repository,
+    )
+    traces = payload["observations"][0]["candidate_score_traces"]
+
+    assert traces == source["observations"][0]["candidate_score_traces"]
+
+
 def test_writer_and_main_reject_overwriting_original_report(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -262,10 +269,8 @@ def test_writer_and_main_reject_overwriting_original_report(
 
     repository = _repository(tmp_path)
     report_path = tmp_path / "old.json"
-    _old_report(
-        repository,
-        report_path,
-    )
+    _old_report(repository, report_path)
+
     payload = rescore_evaluation_report(
         report_path,
         repository,
