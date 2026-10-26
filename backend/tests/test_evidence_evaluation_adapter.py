@@ -26,7 +26,7 @@ ZERO_HISTORY_DIGEST = "sha256:" + "0" * 64
 
 
 def _model_response() -> str:
-    """返回能命中真实 cancel_order 方法的 RequirementSpecDraft。"""
+    """返回能命中真实 cancel_order 方法的需求结果。"""
 
     return """
     {
@@ -142,6 +142,33 @@ def test_adapter_runs_real_retrieval_guard_and_impact_engine(
     assert observation.analyzed_item_count >= 1
     assert observation.assigned_item_count >= observation.analyzed_item_count
     assert observation.latency_ms >= 0
+
+    # 评分轨迹必须完整对应候选池顺序。
+    assert (
+        tuple(trace.path for trace in (observation.candidate_score_traces))
+        == observation.candidate_pool_paths
+    )
+
+    assert tuple(trace.pool_rank for trace in (observation.candidate_score_traces)) == tuple(
+        range(
+            1,
+            len(observation.candidate_pool_paths) + 1,
+        )
+    )
+
+    service_trace = next(
+        trace
+        for trace in (observation.candidate_score_traces)
+        if (trace.path == "order_app/service.py")
+    )
+    service_signals = {signal.name: signal.value for signal in service_trace.signals}
+
+    assert "keyword" in service_signals
+    assert "symbol" in service_signals
+    assert service_trace.total_score == round(
+        sum(service_signals.values()),
+        3,
+    )
 
 
 def test_adapter_indexes_python_only_once(

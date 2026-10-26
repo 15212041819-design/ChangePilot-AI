@@ -22,6 +22,8 @@ from app.engines.impact_engine import (
 )
 from app.schemas.contracts import Budget
 from app.schemas.evaluation_metrics import (
+    CandidateScoreTrace,
+    CandidateSignalTrace,
     EvaluationObservation,
 )
 from app.schemas.guard import GuardDigests
@@ -74,7 +76,7 @@ class EvidenceImpactAdapterConfig:
 
 
 class EvidenceGroundedImpactEvaluationAdapter:
-    """执行新确定性检索与确定性 Impact Engine 的可调用适配器。"""
+    """执行新确定性检索与确定性 Impact Engine 的适配器。"""
 
     def __init__(
         self,
@@ -136,7 +138,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             commit=context.snapshot_commit,
             index_digest=index_digest,
             cochange_index=(context.cochange_index),
-            pool_limit=self._config.pool_limit,
+            pool_limit=(self._config.pool_limit),
         )
 
         budget = Budget(
@@ -156,7 +158,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             raise ValueError("确定性检索没有生成可冻结的 CandidateSet。")
 
         digests = GuardDigests(
-            set_digest=candidate_set.set_digest,
+            set_digest=(candidate_set.set_digest),
             spec_digest=(candidate_set.spec_digest),
             index_digest=(candidate_set.index_digest),
         )
@@ -177,6 +179,29 @@ class EvidenceGroundedImpactEvaluationAdapter:
 
         pool_paths = tuple(entry.path for entry in candidate_pool.entries)
 
+        # 把确定性检索器已经计算出的分项信号
+        # 原样写入评测 observation。
+        # 这里不重新计算分数，避免诊断数据
+        # 与真实排序逻辑出现双重实现。
+        candidate_score_traces = tuple(
+            CandidateScoreTrace(
+                path=entry.path,
+                pool_rank=index,
+                total_score=entry.pre_score,
+                signals=tuple(
+                    CandidateSignalTrace(
+                        name=signal.name,
+                        value=signal.value,
+                    )
+                    for signal in entry.signals
+                ),
+            )
+            for index, entry in enumerate(
+                candidate_pool.entries,
+                start=1,
+            )
+        )
+
         selected_paths = tuple(file_ref.path for file_ref in candidate_set.files)
 
         reported_paths = tuple(
@@ -188,7 +213,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
                     ),
                     *(
                         normalize_digest_path(change_point.path)
-                        for change_point in impact_result.change_points
+                        for change_point in (impact_result.change_points)
                     ),
                 }
             )
@@ -211,11 +236,11 @@ class EvidenceGroundedImpactEvaluationAdapter:
         )
 
         return EvaluationObservation(
-            sample_id=context.sample.sample_id,
+            sample_id=(context.sample.sample_id),
             status=(impact_result.branch_result.status),
-            candidate_pool_paths=pool_paths,
-            selected_paths=selected_paths,
-            reported_paths=reported_paths,
+            candidate_pool_paths=(pool_paths),
+            selected_paths=(selected_paths),
+            reported_paths=(reported_paths),
             invalid_reported_paths=(invalid_reported_paths),
             analyzed_item_count=(coverage.analyzed),
             assigned_item_count=(coverage.assigned),
@@ -228,6 +253,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             # 后续接入模型观测层后再填充，
             # 不能根据文本长度猜测。
             token_count=0,
+            candidate_score_traces=(candidate_score_traces),
         )
 
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import fsum
 from typing import Literal
 
 EvaluationRunStatus = Literal[
@@ -14,6 +15,71 @@ EvaluationRunStatus = Literal[
     "degraded",
     "failed",
 ]
+CandidateSignalName = Literal[
+    "keyword",
+    "symbol",
+    "dep_closure",
+    "cochange",
+    "testmap",
+]
+
+
+@dataclass(frozen=True)
+class CandidateSignalTrace:
+    """一个候选文件的单项确定性评分证据。"""
+
+    name: CandidateSignalName
+    value: float
+
+    def __post_init__(self) -> None:
+        """信号分数必须非负并统一到三位小数。"""
+
+        if self.value < 0:
+            raise ValueError("候选信号分数不能为负数。")
+
+        if round(self.value, 3) != self.value:
+            raise ValueError("候选信号分数最多保留三位小数。")
+
+
+@dataclass(frozen=True)
+class CandidateScoreTrace:
+    """一个 CandidatePool 条目的可复算评分轨迹。"""
+
+    path: str
+    pool_rank: int
+    total_score: float
+    signals: tuple[
+        CandidateSignalTrace,
+        ...,
+    ]
+
+    def __post_init__(self) -> None:
+        """确保排名、信号顺序和总分没有被篡改。"""
+
+        if not self.path.strip():
+            raise ValueError("候选评分路径不能为空。")
+
+        if self.pool_rank <= 0:
+            raise ValueError("pool_rank 必须大于 0。")
+
+        if not self.signals:
+            raise ValueError("候选评分轨迹必须至少包含一个信号。")
+
+        signal_names = tuple(signal.name for signal in self.signals)
+
+        if signal_names != tuple(sorted(signal_names)):
+            raise ValueError("候选评分信号必须按名称稳定排序。")
+
+        if len(signal_names) != len(set(signal_names)):
+            raise ValueError("候选评分信号名称不能重复。")
+
+        expected_total = round(
+            fsum(sorted(signal.value for signal in self.signals)),
+            3,
+        )
+
+        if self.total_score != expected_total:
+            raise ValueError("total_score 必须等于所有候选信号的稳定求和结果。")
 
 
 def _validate_unique_paths(
@@ -44,6 +110,13 @@ class EvaluationObservation:
     latency_ms: float
     token_count: int = 0
     error: str | None = None
+
+    # 旧报告允许为空；新评测应记录每个候选文件
+    # 的排名、总分和分项评分证据。
+    candidate_score_traces: tuple[
+        CandidateScoreTrace,
+        ...,
+    ] = ()
 
     def __post_init__(self) -> None:
         """阻止重复路径、伪造覆盖率和矛盾状态进入评测。"""
@@ -98,6 +171,23 @@ class EvaluationObservation:
         if self.status != "failed" and self.error is not None:
             raise ValueError("只有 failed 运行可以提供 error。")
 
+        if self.candidate_score_traces:
+            trace_paths = tuple(trace.path for trace in self.candidate_score_traces)
+            trace_ranks = tuple(trace.pool_rank for trace in self.candidate_score_traces)
+
+            if trace_paths != self.candidate_pool_paths:
+                raise ValueError("candidate_score_traces 必须逐项对应 candidate_pool_paths。")
+
+            expected_ranks = tuple(
+                range(
+                    1,
+                    len(trace_ranks) + 1,
+                )
+            )
+
+            if trace_ranks != expected_ranks:
+                raise ValueError("候选评分轨迹的 pool_rank 必须从 1 连续递增。")
+
 
 @dataclass(frozen=True)
 class SampleEvaluationMetrics:
@@ -147,7 +237,10 @@ class EvaluationMetricsReport:
     coverage_rate: float
     average_latency_ms: float
     total_token_count: int
-    samples: tuple[SampleEvaluationMetrics, ...]
+    samples: tuple[
+        SampleEvaluationMetrics,
+        ...,
+    ]
 
     def __post_init__(self) -> None:
         """确保聚合计数覆盖数据集里的每一条样本。"""
