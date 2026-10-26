@@ -14,7 +14,11 @@ from app.schemas.evidence_analysis_api import (
 )
 from app.services.evidence_analysis import (
     EvidenceAnalysisReviewRequiredError,
+    EvidenceAnalysisUnavailableError,
     ProductionEvidenceAnalysisExecutor,
+)
+from app.tools.git_cochange import (
+    CoChangeLeakReport,
 )
 
 
@@ -46,15 +50,7 @@ def _requirement_response(
 ) -> str:
     """构造 Requirement Agent 的结构化响应。"""
 
-    assumptions = (
-        [
-            {
-                "text": "取消后是否恢复库存尚未确认。",
-            }
-        ]
-        if with_assumption
-        else []
-    )
+    assumptions = [{"text": ("取消后是否恢复库存尚未确认。")}] if with_assumption else []
 
     return json.dumps(
         {
@@ -292,7 +288,8 @@ def test_executor_analyzes_exact_historical_commit_in_worktree(
     assert report.overview.status == "ready"
     assert report.candidate_set.commit == historical_commit
 
-    # 生产分析结束后，用户当前工作区不应发生变化。
+    # 当前仓库仍然停留在最新提交，
+    # 没有被历史分析切换。
     assert (
         _git(
             repository,
@@ -303,3 +300,40 @@ def test_executor_analyzes_exact_historical_commit_in_worktree(
     )
 
     assert (repository / "newer.py").is_file()
+
+
+def test_executor_stops_when_cochange_leak_check_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共变历史未通过泄漏自检时不得进入 LLM 和分析分支。"""
+
+    monkeypatch.setattr(
+        "app.services.evidence_analysis.check_cochange_leak",
+        lambda *_: CoChangeLeakReport(
+            passed=False,
+            target_commit_matches=True,
+            target_commit_excluded=False,
+            checked_commit_count=1,
+            unexpected_commits=("f" * 40,),
+        ),
+    )
+
+    executor = ProductionEvidenceAnalysisExecutor(
+        workspace_root=_workspace(tmp_path),
+        # 没有提供任何模型响应。
+        # 如果代码错误地继续调用 LLM，
+        # 测试会立即失败。
+        model=FakeListChatModel(responses=[]),
+    )
+
+    with pytest.raises(
+        EvidenceAnalysisUnavailableError,
+        match="时间泄漏",
+    ):
+        executor.analyze(
+            EvidenceAnalysisRequest(
+                request_text=("为订单系统增加取消订单功能"),
+                repository_name=("order_service"),
+            )
+        )

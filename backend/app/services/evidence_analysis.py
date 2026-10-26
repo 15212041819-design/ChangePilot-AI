@@ -3,11 +3,12 @@
 生产执行器负责组装完整链路，但大型仓库索引始终保存在 LangGraph state 外：
 
 1. 安全解析并扫描工作区仓库；
-2. 建立一次符号索引、依赖图和仓库词表；
-3. 调用 Requirement Agent 和 Semantic Mapping Agent；
-4. 生成并 Guard 校验 ChangePoint；
-5. 运行 Impact、Test、Risk 分支；
-6. 执行结果审核并返回统一报告。
+2. 建立符号索引、依赖图、仓库词表和历史共变索引；
+3. 对共变索引执行时间泄漏自检；
+4. 调用 Requirement Agent 和 Semantic Mapping Agent；
+5. 生成并 Guard 校验 ChangePoint；
+6. 运行 Impact、Test、Risk 分支；
+7. 执行结果审核并返回统一报告。
 
 每个请求的 Git ref 都会先解析为精确 commit SHA，再在临时脱离式
 worktree 中分析。该过程不切换用户分支，也不修改用户当前工作区。
@@ -26,7 +27,9 @@ from langchain_core.language_models.chat_models import (
 from app.engines.impact_engine import (
     analyze_impact_evidence,
 )
-from app.engines.risk_engine import analyze_risks
+from app.engines.risk_engine import (
+    analyze_risks,
+)
 from app.engines.test_strategy_engine import (
     analyze_test_strategy,
 )
@@ -34,9 +37,15 @@ from app.graph.parallel_analysis import (
     build_parallel_analysis_graph,
     create_parallel_analysis_state,
 )
-from app.schemas.analysis_report import AnalysisReport
-from app.schemas.branch_result import BranchResult
-from app.schemas.contracts import CandidateSet
+from app.schemas.analysis_report import (
+    AnalysisReport,
+)
+from app.schemas.branch_result import (
+    BranchResult,
+)
+from app.schemas.contracts import (
+    CandidateSet,
+)
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
 )
@@ -51,6 +60,11 @@ from app.services.semantic_context import (
 )
 from app.tools.context_builder import (
     build_repository_vocabulary,
+)
+from app.tools.git_cochange import (
+    CoChangeError,
+    build_cochange_index,
+    check_cochange_leak,
 )
 from app.tools.git_snapshot import (
     GitSnapshotError,
@@ -123,8 +137,11 @@ class ProductionEvidenceAnalysisExecutor:
                     resolved_commit=(checkout.resolved_commit),
                 )
 
-        except GitSnapshotError as exc:
-            raise EvidenceAnalysisUnavailableError(f"无法创建隔离的 Git 快照：{exc}") from exc
+        except (
+            GitSnapshotError,
+            CoChangeError,
+        ) as exc:
+            raise EvidenceAnalysisUnavailableError(f"无法创建或读取可信 Git 证据：{exc}") from exc
 
     def _analyze_snapshot(
         self,
@@ -139,6 +156,21 @@ class ProductionEvidenceAnalysisExecutor:
 
         if not repository.files:
             raise ValueError("仓库扫描结果为空，不能执行证据分析。")
+
+        # 共变索引必须在任何 LLM 调用之前建立并校验。
+        # 一旦泄漏检查失败，本次分析立即终止。
+        cochange_index = build_cochange_index(
+            repository_path,
+            resolved_commit,
+        )
+
+        leak_report = check_cochange_leak(
+            repository_path,
+            cochange_index,
+        )
+
+        if not leak_report.passed:
+            raise EvidenceAnalysisUnavailableError("Git 共变历史未通过时间泄漏自检，已停止分析。")
 
         # 只解析一次 AST。
         # Requirement Agent、Semantic Mapping、三个分支
@@ -182,6 +214,7 @@ class ProductionEvidenceAnalysisExecutor:
             prebuilt_symbol_index=(symbol_index),
             prebuilt_dependency_graph=(dependency_graph),
             prebuilt_repository_vocabulary=(repository_vocabulary),
+            prebuilt_cochange_index=(cochange_index),
         )
 
         if semantic_context.index_coverage < MIN_INDEX_COVERAGE:
@@ -203,9 +236,10 @@ class ProductionEvidenceAnalysisExecutor:
             object,
         ] = {
             "requirement_spec": (requirement_result.spec),
-            "repository_snapshot": repository,
-            "symbol_index": symbol_index,
-            "dependency_graph": dependency_graph,
+            "repository_snapshot": (repository),
+            "symbol_index": (symbol_index),
+            "dependency_graph": (dependency_graph),
+            "cochange_index": (cochange_index),
             # schema 索引器尚未接入时显式为空，
             # Risk Engine 不会猜测模型字段。
             "schema_models": (),
@@ -213,9 +247,6 @@ class ProductionEvidenceAnalysisExecutor:
 
         # ChangePoint 是三个分支共享的中性、
         # 已验证证据。
-        #
-        # 先生成一次，再由并行分支只读消费，
-        # 避免 Test/Risk 读取 Impact 的结论。
         impact_evidence = analyze_impact_evidence(
             candidate_set,
             digests,
@@ -241,7 +272,7 @@ class ProductionEvidenceAnalysisExecutor:
             branch_digests: GuardDigests,
             _: Mapping[str, object],
         ) -> BranchResult:
-            """把预先通过 Guard 的 Impact 结果送入并行 fan-in。"""
+            """把预先 Guard 通过的 Impact 结果送入并行 fan-in。"""
 
             if branch_candidate_set != candidate_set or branch_digests != digests:
                 raise ValueError("Impact 缓存与并行工作流输入不一致。")
@@ -251,7 +282,7 @@ class ProductionEvidenceAnalysisExecutor:
         graph = build_parallel_analysis_graph(
             impact_runner=(cached_impact_runner),
             test_runner=(analyze_test_strategy),
-            risk_runner=analyze_risks,
+            risk_runner=(analyze_risks),
             resources=resources,
         )
 

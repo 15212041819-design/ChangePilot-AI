@@ -3,7 +3,7 @@
 本模块实现 evidence-grounded 工作流中的确定性基线：
 
 1. 从仓库快照建立 Python 符号索引和依赖图；
-2. 用需求关键词、符号命中、依赖闭包和测试映射生成宽候选池；
+2. 用需求关键词、符号命中、依赖闭包、历史共变和测试映射生成宽候选池；
 3. 按稳定分数和路径选出文件，并使用真实内容哈希冻结 CandidateSet；
 4. 不调用 LLM，不执行用户代码，不修改仓库。
 """
@@ -38,6 +38,10 @@ from app.tools.contract_digest import (
     normalize_digest_path,
     stable_signal_sum,
 )
+from app.tools.git_cochange import (
+    CoChangeIndex,
+    find_cochange_neighbors,
+)
 from app.tools.python_dependency_graph import (
     build_python_dependency_graph,
 )
@@ -46,10 +50,20 @@ from app.tools.python_symbol_indexer import (
 )
 
 EMPTY_SHA256 = "sha256:" + "0" * 64
-
 DEFAULT_POOL_LIMIT = 50
 MAX_POOL_LIMIT = 60
 DEPENDENCY_DEPTH = 2
+
+# 至少共同修改两次才作为候选证据，
+# 避免单次偶然提交产生大量噪声。
+MIN_COCHANGE_SHARED_COMMITS = 2
+
+# 每个直接命中文件最多扩展 10 个历史共变邻居。
+MAX_COCHANGE_NEIGHBORS_PER_SEED = 10
+
+# 共变信号的最高权重低于符号命中，
+# 防止历史相关性覆盖当前代码事实。
+MAX_COCHANGE_SIGNAL = 1.25
 
 CONFIG_SUFFIXES = {
     ".cfg",
@@ -191,7 +205,7 @@ def compute_repository_index_digest(
                     "qualified_name": (symbol.qualified_name),
                     "kind": symbol.kind,
                     "line_start": (symbol.line_start),
-                    "line_end": symbol.line_end,
+                    "line_end": (symbol.line_end),
                     "signature": (symbol.signature),
                 }
                 for symbol in sorted(
@@ -229,7 +243,7 @@ def compute_repository_index_digest(
     dependencies = [
         {
             "source_module": (item.source_module),
-            "source_file": (normalize_digest_path(item.source_file)),
+            "source_file": normalize_digest_path(item.source_file),
             "target_module": (item.target_module),
             "target_file": (
                 normalize_digest_path(item.target_file) if item.target_file is not None else None
@@ -313,7 +327,7 @@ def _path_allowed(
 
     excluded = {
         item.strip().replace("\\", "/").strip("/")
-        for item in (requirement.scope_hints.exclude)
+        for item in requirement.scope_hints.exclude
         if item.strip()
     }
 
@@ -325,7 +339,7 @@ def _path_allowed(
 
     includes = tuple(
         item.strip().replace("\\", "/").strip("/")
-        for item in (requirement.scope_hints.include)
+        for item in requirement.scope_hints.include
         if item.strip()
     )
 
@@ -339,8 +353,11 @@ def _path_allowed(
 
 def _symbol_lookup(
     symbol_index: RepositorySymbolIndex,
-) -> dict[str, tuple[str, ...]]:
-    """建立文件到最多 10 个限定符号名的稳定映射。"""
+) -> dict[
+    str,
+    tuple[str, ...],
+]:
+    """构建文件到最多 10 个限定符号名的稳定映射。"""
 
     return {
         normalize_digest_path(indexed_file.file_path): tuple(
@@ -353,7 +370,7 @@ def _symbol_lookup(
                 ),
             )[:10]
         )
-        for indexed_file in (symbol_index.files)
+        for indexed_file in symbol_index.files
     }
 
 
@@ -361,7 +378,10 @@ def _base_signals(
     repository: RepositorySnapshot,
     symbol_index: RepositorySymbolIndex,
     requirement: RequirementSpec,
-) -> dict[str, dict[str, float]]:
+) -> dict[
+    str,
+    dict[str, float],
+]:
     """计算文件的关键词与符号基础信号。"""
 
     terms = _search_terms(requirement)
@@ -383,7 +403,7 @@ def _base_signals(
             continue
 
         # v1 面向代码变更影响分析。
-        # 文档内容容易与需求文本重合，
+        # 文档中容易与需求文本重合，
         # 但不应因此挤占源码候选预算。
         if classify_file_kind(path) == "doc":
             continue
@@ -396,7 +416,7 @@ def _base_signals(
         content_hits = sum(term in lowered_content for term in terms)
 
         keyword_score = round(
-            (path_hits * 1.5 + min(content_hits, 10) * 0.2),
+            path_hits * 1.5 + min(content_hits, 10) * 0.2,
             3,
         )
 
@@ -422,11 +442,7 @@ def _base_signals(
 
         if symbol_hits:
             signals[path]["symbol"] = round(
-                min(
-                    symbol_hits,
-                    10,
-                )
-                * 2.0,
+                min(symbol_hits, 10) * 2.0,
                 3,
             )
 
@@ -438,7 +454,7 @@ def _apply_dependency_signals(
         str,
         dict[str, float],
     ],
-    dependency_graph: (RepositoryDependencyGraph),
+    dependency_graph: RepositoryDependencyGraph,
     repository_paths: set[str],
 ) -> None:
     """从基础命中文件向上下游扩展两层依赖候选。"""
@@ -468,7 +484,11 @@ def _apply_dependency_signals(
         adjacency[source].add(target)
         adjacency[target].add(source)
 
-        if classify_file_kind(source) == "test" and target in seed_paths:
+        if (
+            source in repository_paths
+            and classify_file_kind(source) == "test"
+            and target in seed_paths
+        ):
             signals[source]["testmap"] = max(
                 signals[source].get(
                     "testmap",
@@ -519,20 +539,78 @@ def _apply_dependency_signals(
             )
 
 
+def _apply_cochange_signals(
+    signals: dict[
+        str,
+        dict[str, float],
+    ],
+    cochange_index: CoChangeIndex,
+    repository_paths: set[str],
+) -> None:
+    """从直接命中文件向外扩展低权重历史共变候选。"""
+
+    seed_paths = tuple(
+        sorted(
+            path
+            for path, path_signals in signals.items()
+            if ("keyword" in path_signals or "symbol" in path_signals)
+        )
+    )
+
+    for seed_path in seed_paths:
+        neighbors = find_cochange_neighbors(
+            cochange_index,
+            seed_path,
+            min_shared_commits=(MIN_COCHANGE_SHARED_COMMITS),
+            limit=(MAX_COCHANGE_NEIGHBORS_PER_SEED),
+        )
+
+        for neighbor_path, pair in neighbors:
+            if neighbor_path not in repository_paths:
+                continue
+
+            if classify_file_kind(neighbor_path) == "doc":
+                continue
+
+            # 共变只是补充证据，
+            # 最高分不得超过依赖闭包与符号命中。
+            cochange_score = round(
+                min(
+                    MAX_COCHANGE_SIGNAL,
+                    pair.score * MAX_COCHANGE_SIGNAL,
+                ),
+                3,
+            )
+
+            if cochange_score <= 0:
+                continue
+
+            signals[neighbor_path]["cochange"] = max(
+                signals[neighbor_path].get(
+                    "cochange",
+                    0.0,
+                ),
+                cochange_score,
+            )
+
+
 def retrieve_candidate_pool(
     requirement: RequirementSpec,
     repository: RepositorySnapshot,
     symbol_index: RepositorySymbolIndex,
-    dependency_graph: (RepositoryDependencyGraph),
+    dependency_graph: RepositoryDependencyGraph,
     *,
     commit: str,
     index_digest: str,
+    cochange_index: CoChangeIndex | None = None,
     pool_id: str = "PL-0001",
     pool_limit: int = DEFAULT_POOL_LIMIT,
 ) -> CandidatePool:
     """用确定性信号生成最多 60 个真实文件的候选池。"""
 
-    if not commit.strip():
+    normalized_commit = commit.strip()
+
+    if not normalized_commit:
         raise ValueError("commit 不能为空。")
 
     if not (1 <= pool_limit <= MAX_POOL_LIMIT):
@@ -543,6 +621,9 @@ def retrieve_candidate_pool(
 
     if repository.repository_name != dependency_graph.repository_name:
         raise ValueError("仓库快照与依赖图不属于同一仓库。")
+
+    if cochange_index is not None and cochange_index.target_commit != normalized_commit.lower():
+        raise ValueError("CoChangeIndex 与候选池的 commit 不一致。")
 
     repository_files = {
         normalize_digest_path(item.relative_path): item
@@ -565,21 +646,28 @@ def retrieve_candidate_pool(
         set(repository_files),
     )
 
+    if cochange_index is not None:
+        _apply_cochange_signals(
+            signals,
+            cochange_index,
+            set(repository_files),
+        )
+
     symbols_by_path = _symbol_lookup(symbol_index)
 
     ranked: list[PoolEntry] = []
 
-    for path, path_signals in signals.items():
+    for (
+        path,
+        path_signals,
+    ) in signals.items():
         if path not in repository_files or not path_signals:
             continue
 
         signal_models = tuple(
             SignalScore(
                 name=name,
-                value=round(
-                    value,
-                    3,
-                ),
+                value=round(value, 3),
             )
             for name, value in sorted(path_signals.items())
         )
@@ -589,12 +677,10 @@ def retrieve_candidate_pool(
                 path=path,
                 kind=classify_file_kind(path),
                 signals=signal_models,
-                pre_score=(stable_signal_sum(item.value for item in signal_models)),
-                symbols=(
-                    symbols_by_path.get(
-                        path,
-                        (),
-                    )
+                pre_score=stable_signal_sum(item.value for item in signal_models),
+                symbols=symbols_by_path.get(
+                    path,
+                    (),
                 ),
                 source="baseline",
             )
@@ -611,7 +697,7 @@ def retrieve_candidate_pool(
 
     candidate = CandidatePool(
         pool_id=pool_id,
-        commit=commit.strip(),
+        commit=normalized_commit,
         index_digest=index_digest,
         spec_digest=(requirement.spec_digest),
         entries=selected_entries,
@@ -652,7 +738,11 @@ def freeze_candidate_set(
     *,
     budget: Budget,
     set_id: str = "CS-0001",
-    selected_paths: (tuple[str, ...] | None) = None,
+    selected_paths: tuple[
+        str,
+        ...,
+    ]
+    | None = None,
     selected_by: str = "baseline",
 ) -> CandidateSet:
     """根据真实快照内容冻结不可变 CandidateSet。"""
@@ -673,6 +763,7 @@ def freeze_candidate_set(
         )
 
         paths = tuple(entry.path for entry in ordered_entries[: budget.max_files])
+
     else:
         normalized_paths = tuple(normalize_digest_path(path) for path in selected_paths)
 
@@ -700,11 +791,10 @@ def freeze_candidate_set(
 
     for path in sorted(paths):
         entry = entries_by_path[path]
-
         repository_file = repository_by_path[path]
 
         # PoolEntry 不保存符号行号，
-        # 因此这里不能根据猜测填入 line。
+        # 因此不能根据猜测填写 line。
         first_line = None
 
         confidence = round(
@@ -718,7 +808,7 @@ def freeze_candidate_set(
         file_refs.append(
             FileRef(
                 path=path,
-                content_sha256=(hash_content(repository_file.content.encode("utf-8"))),
+                content_sha256=hash_content(repository_file.content.encode("utf-8")),
                 kind=entry.kind,
                 symbols=tuple(entry.symbols[: budget.max_symbols_per_file]),
                 line=first_line,
@@ -734,8 +824,8 @@ def freeze_candidate_set(
         set_id=set_id,
         pool_id=pool.pool_id,
         commit=pool.commit,
-        index_digest=(pool.index_digest),
-        spec_digest=(pool.spec_digest),
+        index_digest=pool.index_digest,
+        spec_digest=pool.spec_digest,
         files=tuple(file_refs),
         truncated=(pool.pool_exhausted or len(pool.entries) > len(file_refs)),
         budget=budget,
@@ -754,7 +844,8 @@ def build_repository_context(
     repository: RepositorySnapshot,
     *,
     commit: str,
-    pool_limit: int = (DEFAULT_POOL_LIMIT),
+    cochange_index: CoChangeIndex | None = None,
+    pool_limit: int = DEFAULT_POOL_LIMIT,
     pool_id: str = "PL-0001",
     set_id: str = "CS-0001",
 ) -> ContextBuildResult:
@@ -782,6 +873,7 @@ def build_repository_context(
         dependency_graph,
         commit=commit,
         index_digest=index_digest,
+        cochange_index=cochange_index,
         pool_id=pool_id,
         pool_limit=pool_limit,
     )
