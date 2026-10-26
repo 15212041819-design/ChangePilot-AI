@@ -1,6 +1,8 @@
 """生产 EvidenceAnalysisExecutor 的真实组装测试。"""
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import (
@@ -12,9 +14,30 @@ from app.schemas.evidence_analysis_api import (
 )
 from app.services.evidence_analysis import (
     EvidenceAnalysisReviewRequiredError,
-    EvidenceAnalysisUnavailableError,
     ProductionEvidenceAnalysisExecutor,
 )
+
+
+def _git(
+    repository: Path,
+    *arguments: str,
+) -> str:
+    """在临时仓库中执行 Git，为 worktree 测试提供真实 commit。"""
+
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            *arguments,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    return completed.stdout.strip()
 
 
 def _requirement_response(
@@ -23,15 +46,23 @@ def _requirement_response(
 ) -> str:
     """构造 Requirement Agent 的结构化响应。"""
 
-    assumptions = [{"text": "取消后是否恢复库存尚未确认。"}] if with_assumption else []
+    assumptions = (
+        [
+            {
+                "text": "取消后是否恢复库存尚未确认。",
+            }
+        ]
+        if with_assumption
+        else []
+    )
 
     return json.dumps(
         {
-            "summary": "订单所属用户可以取消待支付订单。",
+            "summary": ("订单所属用户可以取消待支付订单。"),
             "change_type": "feature",
             "acceptance_criteria": [
                 {
-                    "description": "订单所属用户可以取消待支付订单。",
+                    "description": ("订单所属用户可以取消待支付订单。"),
                     "verification": "test",
                     "priority": "P0",
                 }
@@ -39,8 +70,12 @@ def _requirement_response(
             "entity_hints": [
                 {
                     "concept": "取消订单",
-                    "lexical_variants": ["cancel order"],
-                    "symbol_candidates": ["cancel_order"],
+                    "lexical_variants": [
+                        "cancel order",
+                    ],
+                    "symbol_candidates": [
+                        "cancel_order",
+                    ],
                     "role": "action_target",
                 }
             ],
@@ -64,13 +99,15 @@ def _semantic_response() -> str:
                 "tests/test_service.py",
             ],
             "queries": [],
-            "explanation": "源码和测试文件均有真实符号与导入证据。",
+            "explanation": ("源码和测试文件均有真实符号与导入证据。"),
         },
         ensure_ascii=False,
     )
 
 
-def _workspace(tmp_path):
+def _workspace(
+    tmp_path: Path,
+) -> Path:
     """创建生产执行器可以安全扫描的临时工作区。"""
 
     root = tmp_path / "sample_repos"
@@ -87,17 +124,48 @@ def _workspace(tmp_path):
     )
 
     (tests_dir / "test_service.py").write_text(
-        "from order_app.service import OrderService\n\n"
+        "from order_app.service "
+        "import OrderService\n\n"
         "def test_cancel_order() -> None:\n"
         "    OrderService().cancel_order('1')\n",
         encoding="utf-8",
+    )
+
+    # 生产执行器只分析精确 Git 快照，
+    # 因此测试也使用真实仓库。
+    _git(
+        repository,
+        "init",
+    )
+    _git(
+        repository,
+        "config",
+        "user.email",
+        "tests@example.com",
+    )
+    _git(
+        repository,
+        "config",
+        "user.name",
+        "ChangePilot Tests",
+    )
+    _git(
+        repository,
+        "add",
+        ".",
+    )
+    _git(
+        repository,
+        "commit",
+        "-m",
+        "initial order service",
     )
 
     return root
 
 
 def test_production_executor_returns_reviewed_unified_report(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """真实工具链应完成扫描、映射、三路分析、审核和报告。"""
 
@@ -113,7 +181,7 @@ def test_production_executor_returns_reviewed_unified_report(
 
     report = executor.analyze(
         EvidenceAnalysisRequest(
-            request_text="为订单系统增加取消订单功能",
+            request_text=("为订单系统增加取消订单功能"),
             repository_name="order_service",
             commit="HEAD",
         )
@@ -136,7 +204,7 @@ def test_production_executor_returns_reviewed_unified_report(
 
 
 def test_executor_stops_before_semantic_mapping_when_review_is_required(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """未确认假设不能被生产执行器自动批准。"""
 
@@ -157,30 +225,81 @@ def test_executor_stops_before_semantic_mapping_when_review_is_required(
     ):
         executor.analyze(
             EvidenceAnalysisRequest(
-                request_text="为订单系统增加取消订单功能",
-                repository_name="order_service",
+                request_text=("为订单系统增加取消订单功能"),
+                repository_name=("order_service"),
             )
         )
 
 
-def test_executor_rejects_historical_commit_until_worktree_is_available(
-    tmp_path,
+def test_executor_analyzes_exact_historical_commit_in_worktree(
+    tmp_path: Path,
 ) -> None:
-    """历史 commit 不能错误读取当前工作区并冒充历史快照。"""
+    """历史 commit 应在隔离 worktree 中完成全链路分析。"""
 
-    executor = ProductionEvidenceAnalysisExecutor(
-        workspace_root=_workspace(tmp_path),
-        model=FakeListChatModel(responses=[]),
+    workspace_root = _workspace(tmp_path)
+
+    repository = workspace_root / "order_service"
+
+    historical_commit = _git(
+        repository,
+        "rev-parse",
+        "HEAD",
     )
 
-    with pytest.raises(
-        EvidenceAnalysisUnavailableError,
-        match="git worktree",
-    ):
-        executor.analyze(
-            EvidenceAnalysisRequest(
-                request_text="为订单系统增加取消订单功能",
-                repository_name="order_service",
-                commit="abc123",
-            )
+    # 在当前工作区中创建新提交，
+    # 确保目标 commit 确实是历史版本。
+    (repository / "newer.py").write_text(
+        "NEWER = True\n",
+        encoding="utf-8",
+    )
+
+    _git(
+        repository,
+        "add",
+        "newer.py",
+    )
+    _git(
+        repository,
+        "commit",
+        "-m",
+        "newer unrelated change",
+    )
+
+    current_commit = _git(
+        repository,
+        "rev-parse",
+        "HEAD",
+    )
+
+    executor = ProductionEvidenceAnalysisExecutor(
+        workspace_root=workspace_root,
+        model=FakeListChatModel(
+            responses=[
+                _requirement_response(),
+                _semantic_response(),
+            ]
+        ),
+    )
+
+    report = executor.analyze(
+        EvidenceAnalysisRequest(
+            request_text=("为订单系统增加取消订单功能"),
+            repository_name="order_service",
+            commit=historical_commit,
         )
+    )
+
+    assert report.overview.status == "ready"
+    assert report.candidate_set.commit == historical_commit
+
+    # 生产分析结束后，用户当前工作区不应发生变化。
+    assert (
+        _git(
+            repository,
+            "rev-parse",
+            "HEAD",
+        )
+        == current_commit
+    )
+
+    assert (repository / "newer.py").is_file()

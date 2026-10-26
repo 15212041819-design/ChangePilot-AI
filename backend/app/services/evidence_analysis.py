@@ -9,8 +9,8 @@
 5. 运行 Impact、Test、Risk 分支；
 6. 执行结果审核并返回统一报告。
 
-当前版本只分析 HEAD。历史 commit 必须在后续通过临时 git worktree 隔离，
-在该能力接入前禁止把当前工作区错误地标记为历史快照。
+每个请求的 Git ref 都会先解析为精确 commit SHA，再在临时脱离式
+worktree 中分析。该过程不切换用户分支，也不修改用户当前工作区。
 """
 
 from collections.abc import Mapping
@@ -19,11 +19,17 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import (
+    BaseChatModel,
+)
 
-from app.engines.impact_engine import analyze_impact_evidence
+from app.engines.impact_engine import (
+    analyze_impact_evidence,
+)
 from app.engines.risk_engine import analyze_risks
-from app.engines.test_strategy_engine import analyze_test_strategy
+from app.engines.test_strategy_engine import (
+    analyze_test_strategy,
+)
 from app.graph.parallel_analysis import (
     build_parallel_analysis_graph,
     create_parallel_analysis_state,
@@ -31,18 +37,34 @@ from app.graph.parallel_analysis import (
 from app.schemas.analysis_report import AnalysisReport
 from app.schemas.branch_result import BranchResult
 from app.schemas.contracts import CandidateSet
-from app.schemas.evidence_analysis_api import EvidenceAnalysisRequest
+from app.schemas.evidence_analysis_api import (
+    EvidenceAnalysisRequest,
+)
 from app.schemas.guard import GuardDigests
 from app.services.llm import get_chat_model
-from app.services.requirement_spec_agent import analyze_requirement_spec
+from app.services.requirement_spec_agent import (
+    analyze_requirement_spec,
+)
 from app.services.semantic_context import (
     MIN_INDEX_COVERAGE,
     build_semantic_context,
 )
-from app.tools.context_builder import build_repository_vocabulary
-from app.tools.python_dependency_graph import build_python_dependency_graph
-from app.tools.python_symbol_indexer import index_python_symbols
-from app.tools.repository_scanner import scan_repository
+from app.tools.context_builder import (
+    build_repository_vocabulary,
+)
+from app.tools.git_snapshot import (
+    GitSnapshotError,
+    checkout_repository_snapshot,
+)
+from app.tools.python_dependency_graph import (
+    build_python_dependency_graph,
+)
+from app.tools.python_symbol_indexer import (
+    index_python_symbols,
+)
+from app.tools.repository_scanner import (
+    scan_repository,
+)
 from app.tools.workspace import (
     DEFAULT_WORKSPACE_ROOT,
     resolve_repository_directory,
@@ -73,7 +95,7 @@ class ProductionEvidenceAnalysisExecutor:
     def __init__(
         self,
         *,
-        workspace_root: str | Path = DEFAULT_WORKSPACE_ROOT,
+        workspace_root: str | Path = (DEFAULT_WORKSPACE_ROOT),
         model: BaseChatModel | None = None,
     ) -> None:
         self._workspace_root = Path(workspace_root)
@@ -83,27 +105,48 @@ class ProductionEvidenceAnalysisExecutor:
         self,
         request: EvidenceAnalysisRequest,
     ) -> AnalysisReport:
-        """执行一次 HEAD 快照上的完整 evidence-grounded 分析。"""
-
-        if request.commit.casefold() != "head":
-            raise EvidenceAnalysisUnavailableError(
-                "历史 commit 分析尚未接入隔离 git worktree；当前只允许 commit=HEAD。"
-            )
+        """在隔离的 Git 快照上执行完整分析。"""
 
         repository_path = resolve_repository_directory(
             request.repository_name,
             workspace_root=self._workspace_root,
         )
 
+        try:
+            with checkout_repository_snapshot(
+                repository_path,
+                request.commit,
+            ) as checkout:
+                return self._analyze_snapshot(
+                    request,
+                    repository_path=(checkout.repository_path),
+                    resolved_commit=(checkout.resolved_commit),
+                )
+
+        except GitSnapshotError as exc:
+            raise EvidenceAnalysisUnavailableError(f"无法创建隔离的 Git 快照：{exc}") from exc
+
+    def _analyze_snapshot(
+        self,
+        request: EvidenceAnalysisRequest,
+        *,
+        repository_path: Path,
+        resolved_commit: str,
+    ) -> AnalysisReport:
+        """分析已经隔离且固定到精确 commit 的仓库目录。"""
+
         repository = scan_repository(repository_path)
 
         if not repository.files:
             raise ValueError("仓库扫描结果为空，不能执行证据分析。")
 
-        # 只解析一次 AST。Requirement Agent、Semantic Mapping、三个分支
+        # 只解析一次 AST。
+        # Requirement Agent、Semantic Mapping、三个分支
         # 全部共享这一份索引和由它构建的依赖图。
         symbol_index = index_python_symbols(repository)
+
         dependency_graph = build_python_dependency_graph(symbol_index)
+
         repository_vocabulary = build_repository_vocabulary(
             repository,
             symbol_index,
@@ -127,17 +170,18 @@ class ProductionEvidenceAnalysisExecutor:
             raise EvidenceAnalysisReviewRequiredError(
                 "需求分析包含尚未确认的假设："
                 + "、".join(unresolved_assumptions)
-                + "；请先通过需求审核接口确认或修订后再运行证据分析。"
+                + "；请先通过需求审核接口确认"
+                + "或修订后再运行证据分析。"
             )
 
         semantic_context = build_semantic_context(
             requirement_result.spec,
             repository,
-            commit="HEAD",
+            commit=resolved_commit,
             model=selected_model,
-            prebuilt_symbol_index=symbol_index,
-            prebuilt_dependency_graph=dependency_graph,
-            prebuilt_repository_vocabulary=repository_vocabulary,
+            prebuilt_symbol_index=(symbol_index),
+            prebuilt_dependency_graph=(dependency_graph),
+            prebuilt_repository_vocabulary=(repository_vocabulary),
         )
 
         if semantic_context.index_coverage < MIN_INDEX_COVERAGE:
@@ -149,24 +193,29 @@ class ProductionEvidenceAnalysisExecutor:
             raise ValueError("冻结 CandidateSet 为空，不能启动并行分析。")
 
         digests = GuardDigests(
-            set_digest=candidate_set.set_digest,
-            spec_digest=candidate_set.spec_digest,
-            index_digest=candidate_set.index_digest,
+            set_digest=(candidate_set.set_digest),
+            spec_digest=(candidate_set.spec_digest),
+            index_digest=(candidate_set.index_digest),
         )
 
-        base_resources: dict[str, object] = {
-            "requirement_spec": requirement_result.spec,
+        base_resources: dict[
+            str,
+            object,
+        ] = {
+            "requirement_spec": (requirement_result.spec),
             "repository_snapshot": repository,
             "symbol_index": symbol_index,
             "dependency_graph": dependency_graph,
             # schema 索引器尚未接入时显式为空，
-            # Risk Engine 不会凭空猜测模型字段。
+            # Risk Engine 不会猜测模型字段。
             "schema_models": (),
         }
 
-        # ChangePoint 是三个分支共享的中性、已验证证据。
+        # ChangePoint 是三个分支共享的中性、
+        # 已验证证据。
+        #
         # 先生成一次，再由并行分支只读消费，
-        # 避免 Test/Risk 读取 Impact 分支的分析结论。
+        # 避免 Test/Risk 读取 Impact 的结论。
         impact_evidence = analyze_impact_evidence(
             candidate_set,
             digests,
@@ -177,11 +226,13 @@ class ProductionEvidenceAnalysisExecutor:
 
         branch_resources = {
             **base_resources,
-            "validated_change_points": impact_evidence.change_points,
+            "validated_change_points": (impact_evidence.change_points),
         }
 
-        # 大型资源保存在图外部，只把 resource_id 写入图状态。
-        resources: dict[str, object] = {
+        resources: dict[
+            str,
+            object,
+        ] = {
             resource_id: branch_resources,
         }
 
@@ -190,7 +241,7 @@ class ProductionEvidenceAnalysisExecutor:
             branch_digests: GuardDigests,
             _: Mapping[str, object],
         ) -> BranchResult:
-            """把预先 Guard 通过的 Impact 结果送入统一并行 fan-in。"""
+            """把预先通过 Guard 的 Impact 结果送入并行 fan-in。"""
 
             if branch_candidate_set != candidate_set or branch_digests != digests:
                 raise ValueError("Impact 缓存与并行工作流输入不一致。")
@@ -198,8 +249,8 @@ class ProductionEvidenceAnalysisExecutor:
             return impact_evidence.branch_result
 
         graph = build_parallel_analysis_graph(
-            impact_runner=cached_impact_runner,
-            test_runner=analyze_test_strategy,
+            impact_runner=(cached_impact_runner),
+            test_runner=(analyze_test_strategy),
             risk_runner=analyze_risks,
             resources=resources,
         )
