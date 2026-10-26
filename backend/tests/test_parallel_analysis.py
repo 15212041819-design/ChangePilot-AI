@@ -1,4 +1,4 @@
-"""三路并行分析、稳定 fan-in 和结果审核工作流测试。"""
+"""三路并行分析、结果审核和统一报告工作流测试。"""
 
 import json
 from collections.abc import Mapping
@@ -71,7 +71,7 @@ def candidate_set() -> CandidateSet:
 
 
 def requirement_spec() -> RequirementSpec:
-    """创建工作流审核节点使用的唯一需求词汇表。"""
+    """创建工作流审核和报告使用的需求。"""
 
     return RequirementSpec(
         spec_id="RS-0001",
@@ -106,7 +106,7 @@ def change_points() -> tuple[
     ChangePoint,
     ...,
 ]:
-    """创建已经通过 Guard 的 AC-001 实施变更点。"""
+    """创建已经通过 Guard 的实施变更点。"""
 
     return (
         ChangePoint(
@@ -160,9 +160,12 @@ def successful_runner(
     def runner(
         frozen_set: CandidateSet,
         digests: GuardDigests,
-        resources: Mapping[str, object],
+        resources: Mapping[
+            str,
+            object,
+        ],
     ) -> BranchResult:
-        """验证资源通过闭包传入，而不是写进 state。"""
+        """验证资源通过闭包传入。"""
 
         assert resources["symbol_index"] is not None
 
@@ -178,13 +181,13 @@ def successful_runner(
                     branch,
                     "B",
                     priority="minor",
-                    path="app/service.py",
+                    path=("app/service.py"),
                 ),
                 finding(
                     branch,
                     "A",
                     priority="major",
-                    path="app/models.py",
+                    path=("app/models.py"),
                 ),
             ),
             consumed_digests=digests,
@@ -199,25 +202,32 @@ def graph(
     test_runner=None,
     risk_runner=None,
     validated_change_points=None,
+    review_requirement_spec=None,
     include_review_resources: bool = True,
 ):
-    """创建使用不可序列化运行期资源的测试图。"""
+    """创建带外部资源容器的测试图。"""
 
     branch_resources: dict[
         str,
         object,
     ] = {
-        # object() 故意不可 JSON 序列化，
-        # 用于证明资源没有进入 state。
+        # 故意使用不可 JSON 序列化对象，
+        # 证明资源不会被写进 state。
         "symbol_index": object(),
     }
 
     if include_review_resources:
         branch_resources.update(
             {
-                "requirement_spec": (requirement_spec()),
+                "requirement_spec": (
+                    requirement_spec()
+                    if (review_requirement_spec is None)
+                    else (review_requirement_spec)
+                ),
                 "validated_change_points": (
-                    change_points() if validated_change_points is None else validated_change_points
+                    change_points()
+                    if (validated_change_points is None)
+                    else (validated_change_points)
                 ),
             }
         )
@@ -232,8 +242,11 @@ def graph(
     )
 
 
-def initial_state() -> dict[str, object]:
-    """创建可直接传入 LangGraph 的 JSON state。"""
+def initial_state() -> dict[
+    str,
+    object,
+]:
+    """创建可传入 LangGraph 的初始状态。"""
 
     return create_parallel_analysis_state(
         candidate_set(),
@@ -242,7 +255,7 @@ def initial_state() -> dict[str, object]:
 
 
 def test_t27_parallel_fan_in_has_stable_branch_and_finding_order() -> None:
-    """T-27：并行完成顺序不能改变最终结果顺序。"""
+    """并行完成顺序不能改变结果顺序。"""
 
     first = graph().invoke(initial_state())
 
@@ -268,7 +281,7 @@ def test_t27_parallel_fan_in_has_stable_branch_and_finding_order() -> None:
 
 
 def test_t28_state_is_json_serializable_and_excludes_resources() -> None:
-    """T-28：state 只保存 resource_id，不保存索引对象。"""
+    """状态必须可序列化且不能包含资源对象。"""
 
     state = initial_state()
 
@@ -286,8 +299,6 @@ def test_t28_state_is_json_serializable_and_excludes_resources() -> None:
 
     assert "symbol_index" not in serialized_result
 
-    # 再使用标准库解析一次，
-    # 证明不是自定义字符串伪装。
     parsed = json.loads(serialized_result)
 
     assert parsed["parallel_status"] == "parallel_complete"
@@ -296,14 +307,23 @@ def test_t28_state_is_json_serializable_and_excludes_resources() -> None:
 
     assert parsed["review_report"]["status"] == "ready"
 
+    assert parsed["analysis_report"]["overview"]["status"] == "ready"
+
+    assert parsed["analysis_report"]["overview"]["can_implement"] is True
+
+    assert parsed["report_error"] is None
+
 
 def test_t29_mismatched_branch_digest_fails_fan_in() -> None:
-    """T-29：任一分支消费不同 digest 时必须阻断 fan-in。"""
+    """任一分支消费不同 digest 时必须阻断。"""
 
     def mismatched_risk_runner(
         frozen_set: CandidateSet,
         digests: GuardDigests,
-        resources: Mapping[str, object],
+        resources: Mapping[
+            str,
+            object,
+        ],
     ) -> BranchResult:
         assert resources["symbol_index"] is not None
 
@@ -321,11 +341,11 @@ def test_t29_mismatched_branch_digest_fails_fan_in() -> None:
                 "app/service.py",
             ),
             findings=(),
-            consumed_digests=mismatched,
+            consumed_digests=(mismatched),
         )
 
     result = graph(
-        risk_runner=mismatched_risk_runner,
+        risk_runner=(mismatched_risk_runner),
     ).invoke(initial_state())
 
     assert result["parallel_status"] == "parallel_failed"
@@ -340,14 +360,24 @@ def test_t29_mismatched_branch_digest_fails_fan_in() -> None:
 
     assert result["review_report"]["status"] == "blocked"
 
+    # digest 不可信时不得生成统一报告。
+    assert result["analysis_report"] is None
+
+    assert result["report_error"]["code"] == "ValueError"
+
+    assert "risk 分支" in result["report_error"]["message"]
+
 
 def test_single_branch_exception_degrades_without_losing_other_results() -> None:
-    """一个分支异常时，另外两个分支和 fan-in 仍然完成。"""
+    """一个分支异常不能丢失其他分支结果。"""
 
     def failing_test_runner(
         frozen_set: CandidateSet,
         digests: GuardDigests,
-        resources: Mapping[str, object],
+        resources: Mapping[
+            str,
+            object,
+        ],
     ) -> BranchResult:
         del frozen_set
         del digests
@@ -375,14 +405,21 @@ def test_single_branch_exception_degrades_without_losing_other_results() -> None
 
     assert result["review_report"]["status"] == "blocked"
 
+    # 分支失败但 digest 可信时，
+    # 可以生成 blocked 报告供用户查看错误。
+    assert result["analysis_report"]["overview"]["status"] == "blocked"
+
 
 def test_result_review_turns_degraded_risk_branch_into_gate() -> None:
-    """三路可用但 Risk 覆盖不完整时，最终状态必须是 gated。"""
+    """Risk 覆盖不完整时最终状态必须 gated。"""
 
     def degraded_risk_runner(
         frozen_set: CandidateSet,
         digests: GuardDigests,
-        resources: Mapping[str, object],
+        resources: Mapping[
+            str,
+            object,
+        ],
     ) -> BranchResult:
         assert resources["symbol_index"] is not None
 
@@ -395,7 +432,7 @@ def test_result_review_turns_degraded_risk_branch_into_gate() -> None:
         )
 
     result = graph(
-        risk_runner=degraded_risk_runner,
+        risk_runner=(degraded_risk_runner),
     ).invoke(initial_state())
 
     assert result["parallel_status"] == "parallel_degraded"
@@ -406,9 +443,13 @@ def test_result_review_turns_degraded_risk_branch_into_gate() -> None:
 
     assert result["review_report"]["issues"][0]["code"] == "REVIEW-BRANCH-DEGRADED"
 
+    assert result["analysis_report"]["overview"]["status"] == "gated"
+
+    assert result["analysis_report"]["overview"]["can_implement"] is False
+
 
 def test_missing_validated_change_point_blocks_final_workflow() -> None:
-    """AC 没有已验证 ChangePoint 时，审核节点必须阻断后续实施。"""
+    """AC 没有 ChangePoint 时必须阻断实施。"""
 
     result = graph(
         validated_change_points=(),
@@ -422,9 +463,11 @@ def test_missing_validated_change_point_blocks_final_workflow() -> None:
 
     assert result["review_report"]["issues"][0]["code"] == "REVIEW-IMPLEMENTATION-GAP"
 
+    assert result["analysis_report"]["overview"]["status"] == "blocked"
+
 
 def test_review_resource_error_is_structured_and_blocks_workflow() -> None:
-    """审核资源缺失不能让图崩溃，必须留下结构化错误。"""
+    """审核资源缺失必须留下结构化错误。"""
 
     result = graph(
         include_review_resources=False,
@@ -439,3 +482,41 @@ def test_review_resource_error_is_structured_and_blocks_workflow() -> None:
     assert result["review_error"]["code"] == "KeyError"
 
     assert "requirement_spec" in result["review_error"]["message"]
+
+    assert result["analysis_report"] is None
+
+    assert result["report_error"]["code"] == "ReviewUnavailable"
+
+
+def test_workflow_produces_stable_analysis_report_identity() -> None:
+    """相同输入必须得到相同报告 ID 和 digest。"""
+
+    first = graph().invoke(initial_state())
+
+    second = graph().invoke(initial_state())
+
+    assert first["analysis_report"]["report_id"] == second["analysis_report"]["report_id"]
+
+    assert first["analysis_report"]["report_digest"] == second["analysis_report"]["report_digest"]
+
+
+def test_report_builder_error_is_structured_and_blocks_workflow() -> None:
+    """报告输入摘要不一致时必须结构化失败。"""
+
+    mismatched_spec = requirement_spec().model_copy(update={"spec_digest": ONE_HASH})
+
+    result = graph(
+        review_requirement_spec=(mismatched_spec),
+    ).invoke(initial_state())
+
+    # 审核可以完成，但报告构建器会发现
+    # RequirementSpec 和 CandidateSet 不属于同一快照。
+    assert result["review_report"]["status"] == "ready"
+
+    assert result["analysis_report"] is None
+
+    assert result["status"] == "analysis_blocked"
+
+    assert result["report_error"]["code"] == "ValueError"
+
+    assert "spec_digest" in result["report_error"]["message"]

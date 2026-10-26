@@ -1,14 +1,15 @@
-"""Evidence-grounded 架构的三路并行分析与结果审核工作流。
+"""Evidence-grounded 架构的三路并行分析、审核与报告工作流。
 
-本模块暂时不替换旧的 ``change_analysis.py``。它先固定并验证以下编排约束：
+本模块暂时不替换旧的 ``change_analysis.py``。它固定并验证以下约束：
 
 1. Impact、Test、Risk 从同一个 CandidateSet 并行启动；
 2. 每个分支只写自己的 state key；
-3. 单路异常被转换成结构化 BranchResult，不让整个 superstep 崩溃；
+3. 单路异常被转换成结构化 BranchResult；
 4. fan-in 始终按 Impact、Test、Risk 顺序合并；
-5. fan-in 前校验三个分支消费的 digest 是否完全一致；
-6. fan-in 完成后自动执行 AC 覆盖和结论一致性审核；
-7. state 只保存 JSON 数据，索引等资源通过闭包中的资源容器传入。
+5. fan-in 前校验三个分支消费的 digest；
+6. fan-in 后执行 AC 覆盖和结论一致性审核；
+7. 审核后构建供 API 和前端消费的统一报告；
+8. state 只保存 JSON 数据，运行期资源保存在 state 外。
 """
 
 import json
@@ -45,7 +46,10 @@ BranchRunner = Callable[
     BranchResult,
 ]
 
-BRANCH_ORDER: tuple[AnalysisBranch, ...] = (
+BRANCH_ORDER: tuple[
+    AnalysisBranch,
+    ...,
+] = (
     "impact",
     "test",
     "risk",
@@ -62,7 +66,7 @@ BRANCH_STATE_KEYS: dict[
 
 
 class ParallelAnalysisState(TypedDict):
-    """只包含可 JSON 序列化数据的并行工作流状态。"""
+    """只包含可 JSON 序列化数据的工作流状态。"""
 
     candidate_set: dict[str, Any]
 
@@ -78,18 +82,54 @@ class ParallelAnalysisState(TypedDict):
 
     ordered_results: list[dict[str, Any]]
 
-    digest_guard: dict[str, Any] | None
+    digest_guard: (
+        dict[
+            str,
+            Any,
+        ]
+        | None
+    )
 
-    # 只描述三路并行分析本身的状态。
+    # 仅表示三个并行分析分支的运行结果。
     parallel_status: str
 
-    # 结果审核引擎生成的结构化审核报告。
-    review_report: dict[str, Any] | None
+    # 结果审核引擎输出。
+    review_report: (
+        dict[
+            str,
+            Any,
+        ]
+        | None
+    )
 
-    # 审核节点本身发生异常时保存结构化错误。
-    review_error: dict[str, str] | None
+    # 审核节点自身的运行错误。
+    review_error: (
+        dict[
+            str,
+            str,
+        ]
+        | None
+    )
 
-    # 整个分析工作流的最终状态。
+    # 前端和 API 使用的统一报告。
+    analysis_report: (
+        dict[
+            str,
+            Any,
+        ]
+        | None
+    )
+
+    # 报告构建节点自身的运行错误。
+    report_error: (
+        dict[
+            str,
+            str,
+        ]
+        | None
+    )
+
+    # 整个工作流最终状态。
     status: str
 
 
@@ -104,9 +144,9 @@ def create_parallel_analysis_state(
         raise ValueError("resource_id 不能为空。")
 
     digests = GuardDigests(
-        set_digest=candidate_set.set_digest,
-        spec_digest=candidate_set.spec_digest,
-        index_digest=candidate_set.index_digest,
+        set_digest=(candidate_set.set_digest),
+        spec_digest=(candidate_set.spec_digest),
+        index_digest=(candidate_set.index_digest),
     )
 
     return ParallelAnalysisState(
@@ -121,6 +161,8 @@ def create_parallel_analysis_state(
         parallel_status="parallel_ready",
         review_report=None,
         review_error=None,
+        analysis_report=None,
+        report_error=None,
         status="analysis_pending",
     )
 
@@ -128,7 +170,7 @@ def create_parallel_analysis_state(
 def assert_state_json_serializable(
     state: Mapping[str, object],
 ) -> str:
-    """序列化 state；出现运行期资源对象时立即抛出 TypeError。"""
+    """序列化 state，运行期资源进入 state 时立即失败。"""
 
     return json.dumps(
         state,
@@ -144,7 +186,7 @@ def _load_inputs(
     CandidateSet,
     GuardDigests,
 ]:
-    """从 JSON state 恢复冻结候选集和上游摘要。"""
+    """从 JSON state 恢复候选集和摘要。"""
 
     return (
         CandidateSet.model_validate(state["candidate_set"]),
@@ -161,14 +203,14 @@ def _create_branch_node(
     [ParallelAnalysisState],
     dict[str, object],
 ]:
-    """创建一个具有异常降级能力的并行分支节点。"""
+    """创建具有异常降级能力的并行分支节点。"""
 
     state_key = BRANCH_STATE_KEYS[branch]
 
     def branch_node(
         state: ParallelAnalysisState,
     ) -> dict[str, object]:
-        """执行分支，并确保异常不会逃出并行 superstep。"""
+        """执行单个分支，异常不得逃出并行阶段。"""
 
         candidate_set, digests = _load_inputs(state)
 
@@ -194,7 +236,7 @@ def _create_branch_node(
 
         except Exception as error:  # noqa: BLE001
             # 单个分支失败时生成结构化失败结果，
-            # 让其他分支和 fan-in 仍能继续运行。
+            # 让其他分支和 fan-in 继续完成。
             result = build_failed_branch_result(
                 branch=branch,
                 assigned_items=(source_file_assignments(candidate_set)),
@@ -213,7 +255,7 @@ def _create_branch_node(
 def _ordered_branch_results(
     state: ParallelAnalysisState,
 ) -> tuple[BranchResult, ...]:
-    """按固定分支顺序读取结果，禁止依赖节点完成顺序。"""
+    """按固定顺序读取三路结果。"""
 
     results: list[BranchResult] = []
 
@@ -236,7 +278,10 @@ def _ordered_branch_results(
 
 
 def validate_parallel_digests(
-    results: tuple[BranchResult, ...],
+    results: tuple[
+        BranchResult,
+        ...,
+    ],
     *,
     expected: GuardDigests,
 ) -> GuardReport:
@@ -250,7 +295,7 @@ def validate_parallel_digests(
             repairable=False,
         )
         for result in results
-        if result.consumed_digests != expected
+        if (result.consumed_digests != expected)
     )
 
     if invalid:
@@ -288,7 +333,7 @@ def validate_parallel_digests(
 def fan_in_parallel_results(
     state: ParallelAnalysisState,
 ) -> dict[str, object]:
-    """稳定合并三路结果，并计算整个并行阶段的状态。"""
+    """稳定合并三路结果并计算并行阶段状态。"""
 
     results = _ordered_branch_results(state)
 
@@ -311,7 +356,7 @@ def fan_in_parallel_results(
     return {
         "ordered_results": [result.model_dump(mode="json") for result in results],
         "digest_guard": (digest_guard.model_dump(mode="json")),
-        "parallel_status": parallel_status,
+        "parallel_status": (parallel_status),
     }
 
 
@@ -322,12 +367,12 @@ def _create_result_review_node(
     [ParallelAnalysisState],
     dict[str, object],
 ]:
-    """创建审核节点，并把审核异常转换为显式 blocked 状态。"""
+    """创建结果审核节点。"""
 
     def result_review_node(
         state: ParallelAnalysisState,
     ) -> dict[str, object]:
-        """审核三路结果的 AC 覆盖、digest 和结论一致性。"""
+        """审核 AC 覆盖、digest 和结论一致性。"""
 
         try:
             resource_id = state["resource_id"]
@@ -366,9 +411,8 @@ def _create_result_review_node(
 
             expected_digests = GuardDigests.model_validate(state["digests"])
 
-            # 延迟导入用于避免 result_review
-            # 对 BRANCH_ORDER 的反向引用与本图模块
-            # 形成初始化阶段的循环导入。
+            # 延迟导入避免与图模块形成
+            # 初始化阶段循环导入。
             from app.engines.result_review import (
                 review_parallel_results,
             )
@@ -383,7 +427,7 @@ def _create_result_review_node(
             final_status = {
                 "ready": "analysis_ready",
                 "gated": "analysis_gated",
-                "blocked": "analysis_blocked",
+                "blocked": ("analysis_blocked"),
             }[report.status]
 
             return {
@@ -393,8 +437,6 @@ def _create_result_review_node(
             }
 
         except Exception as error:  # noqa: BLE001
-            # 审核节点本身异常时，不让异常伪装成
-            # “审核通过”，而是显式阻断后续实施。
             return {
                 "review_report": None,
                 "review_error": {
@@ -407,6 +449,92 @@ def _create_result_review_node(
     return result_review_node
 
 
+def _create_report_node(
+    *,
+    resources: Mapping[str, object],
+) -> Callable[
+    [ParallelAnalysisState],
+    dict[str, object],
+]:
+    """创建统一报告节点。"""
+
+    def build_report_node(
+        state: ParallelAnalysisState,
+    ) -> dict[str, object]:
+        """使用审核后的数据生成最终 AnalysisReport。"""
+
+        raw_review_report = state["review_report"]
+
+        if raw_review_report is None:
+            return {
+                "analysis_report": None,
+                "report_error": {
+                    "code": ("ReviewUnavailable"),
+                    "message": ("结果审核没有生成可用的 review_report。"),
+                },
+                "status": ("analysis_blocked"),
+            }
+
+        try:
+            resource_id = state["resource_id"]
+
+            branch_resources = resources[resource_id]
+
+            if not isinstance(
+                branch_resources,
+                Mapping,
+            ):
+                raise TypeError("资源容器中的 resource_id 必须映射到 Mapping。")
+
+            raw_spec = branch_resources.get("requirement_spec")
+
+            if raw_spec is None:
+                raise KeyError("统一报告缺少 requirement_spec 资源。")
+
+            candidate_set = CandidateSet.model_validate(state["candidate_set"])
+
+            requirement_spec = RequirementSpec.model_validate(raw_spec)
+
+            branch_results = tuple(
+                BranchResult.model_validate(item) for item in state["ordered_results"]
+            )
+
+            # 延迟导入避免 report_builder
+            # 对 BRANCH_ORDER 的反向引用形成循环。
+            from app.engines.report_builder import (
+                build_analysis_report,
+            )
+            from app.schemas.review import (
+                ReviewReport,
+            )
+
+            review_report = ReviewReport.model_validate(raw_review_report)
+
+            report = build_analysis_report(
+                requirement_spec=(requirement_spec),
+                candidate_set=candidate_set,
+                review_report=review_report,
+                branch_results=branch_results,
+            )
+
+            return {
+                "analysis_report": (report.model_dump(mode="json")),
+                "report_error": None,
+            }
+
+        except Exception as error:  # noqa: BLE001
+            return {
+                "analysis_report": None,
+                "report_error": {
+                    "code": (type(error).__name__),
+                    "message": (str(error) or type(error).__name__),
+                },
+                "status": ("analysis_blocked"),
+            }
+
+    return build_report_node
+
+
 def build_parallel_analysis_graph(
     *,
     impact_runner: BranchRunner,
@@ -414,7 +542,7 @@ def build_parallel_analysis_graph(
     risk_runner: BranchRunner,
     resources: Mapping[str, object],
 ):
-    """构建并编译三路并行分析与结果审核工作流。"""
+    """构建并编译三路分析、审核与报告工作流。"""
 
     builder = StateGraph(ParallelAnalysisState)
 
@@ -457,7 +585,14 @@ def build_parallel_analysis_graph(
         ),
     )
 
-    # 三个分支从同一个 START 并行启动。
+    builder.add_node(
+        "build_report",
+        _create_report_node(
+            resources=resources,
+        ),
+    )
+
+    # 三个分支从 START 并行启动。
     builder.add_edge(
         START,
         "impact_branch",
@@ -473,7 +608,7 @@ def build_parallel_analysis_graph(
         "risk_branch",
     )
 
-    # 等待三路全部返回后稳定合并。
+    # 等待三个分支全部结束后执行 fan-in。
     builder.add_edge(
         [
             "impact_branch",
@@ -483,14 +618,20 @@ def build_parallel_analysis_graph(
         "fan_in",
     )
 
-    # fan-in 完成后统一执行结果审核。
+    # fan-in 之后进行结论审核。
     builder.add_edge(
         "fan_in",
         "result_review",
     )
 
+    # 审核之后构建统一报告。
     builder.add_edge(
         "result_review",
+        "build_report",
+    )
+
+    builder.add_edge(
+        "build_report",
         END,
     )
 
