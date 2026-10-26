@@ -32,6 +32,10 @@ artifacts/
 uploads/
 *.log
 
+# 本地评测生成的 JSON 报告
+# 报告保留在电脑上，但不提交到 Git。
+backend/evals/results/
+
 # 操作系统文件
 .DS_Store
 Thumbs.db
