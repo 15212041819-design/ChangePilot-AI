@@ -11,6 +11,7 @@ from app.schemas.evidence_analysis_api import (
 )
 from app.services.evidence_analysis import (
     EvidenceAnalysisExecutor,
+    EvidenceAnalysisReviewRequiredError,
     EvidenceAnalysisUnavailableError,
     get_evidence_analysis_executor,
 )
@@ -67,11 +68,28 @@ def analyze_change_with_evidence(
 
     try:
         report = executor.analyze(normalized_request)
+
+    except EvidenceAnalysisReviewRequiredError as exc:
+        # 需求存在未确认假设时，不允许系统擅自批准。
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
     except EvidenceAnalysisUnavailableError as exc:
+        # 请求使用了尚未安全实现的能力，例如历史 commit 快照。
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
+
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        # 仓库不存在或解析结果不是目录。
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
     except (KeyError, TypeError, ValueError) as exc:
         # 契约、digest 或组装错误表示上游分析结果不可信。
         raise HTTPException(

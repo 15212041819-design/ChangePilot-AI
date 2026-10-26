@@ -151,6 +151,9 @@ def build_semantic_context(
     *,
     commit: str,
     model: BaseChatModel | None = None,
+    prebuilt_symbol_index: RepositorySymbolIndex | None = None,
+    prebuilt_dependency_graph: RepositoryDependencyGraph | None = None,
+    prebuilt_repository_vocabulary: frozenset[str] | None = None,
     pool_limit: int = DEFAULT_POOL_LIMIT,
     pool_id: str = "PL-0001",
     set_id: str = "CS-0001",
@@ -164,13 +167,23 @@ def build_semantic_context(
 
     _validate_requirement_ready(requirement)
 
-    # 索引只建立一次，后续检索、扩池和 digest
-    # 全部复用同一份仓库事实。
-    symbol_index = index_python_symbols(repository)
+    # 生产执行器在 Requirement Agent 之前已经需要仓库词表，
+    # 因而允许把同一份预建索引继续传入，避免重复解析整个仓库。
+    symbol_index = prebuilt_symbol_index or index_python_symbols(repository)
 
-    dependency_graph = build_python_dependency_graph(symbol_index)
+    if symbol_index.repository_name != repository.repository_name:
+        raise SemanticContextValidationError(
+            "预建 SymbolIndex 与 RepositorySnapshot 不属于同一仓库。"
+        )
 
-    repository_vocabulary = build_repository_vocabulary(
+    dependency_graph = prebuilt_dependency_graph or build_python_dependency_graph(symbol_index)
+
+    if dependency_graph.repository_name != repository.repository_name:
+        raise SemanticContextValidationError(
+            "预建 DependencyGraph 与 RepositorySnapshot 不属于同一仓库。"
+        )
+
+    repository_vocabulary = prebuilt_repository_vocabulary or build_repository_vocabulary(
         repository,
         symbol_index,
     )
@@ -194,7 +207,7 @@ def build_semantic_context(
 
     budget = Budget(
         max_files=requirement.scope_hints.max_files,
-        max_chars_per_file=(requirement.scope_hints.max_chars_per_file),
+        max_chars_per_file=requirement.scope_hints.max_chars_per_file,
         max_symbols_per_file=10,
     )
 
@@ -211,8 +224,7 @@ def build_semantic_context(
 
     frozen_set = semantic_result.candidate_set
 
-    # 再次执行跨阶段摘要断言，防止未来重构时
-    # 传入错误的仓库、需求或候选池。
+    # 这里再次做跨阶段摘要断言，防止未来重构时传错仓库或需求对象。
     if frozen_set.spec_digest != requirement.spec_digest:
         raise SemanticContextValidationError(
             "CandidateSet 与 RequirementSpec 的 spec_digest 不一致。"

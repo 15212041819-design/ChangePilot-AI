@@ -23,7 +23,9 @@ from app.schemas.review import (
     BranchReviewSummary,
     ReviewReport,
 )
-from app.services.evidence_analysis import get_evidence_analysis_executor
+from app.services.evidence_analysis import (
+    get_evidence_analysis_executor,
+)
 
 ZERO_HASH = "sha256:" + "0" * 64
 
@@ -139,7 +141,11 @@ def _build_ready_report() -> AnalysisReport:
         consumed_digests=digests,
     )
 
-    branch_results = (impact, test, risk)
+    branch_results = (
+        impact,
+        test,
+        risk,
+    )
 
     review = ReviewReport(
         status="ready",
@@ -219,8 +225,12 @@ def test_evidence_analysis_endpoint_returns_unified_report() -> None:
         assert executor.requests[0].request_text == "为订单系统增加取消订单功能"
         assert executor.requests[0].repository_name == "order_service"
         assert executor.requests[0].commit == "HEAD"
+
     finally:
-        app.dependency_overrides.pop(get_evidence_analysis_executor, None)
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
 
 
 def test_evidence_analysis_endpoint_rejects_blank_text() -> None:
@@ -239,23 +249,27 @@ def test_evidence_analysis_endpoint_rejects_blank_text() -> None:
 
         assert response.status_code == 422
         assert response.json()["detail"] == "变更需求不能为空。"
+
     finally:
-        app.dependency_overrides.pop(get_evidence_analysis_executor, None)
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
 
 
-def test_evidence_analysis_endpoint_is_explicitly_unavailable_before_wiring() -> None:
-    """生产执行器未装配时必须返回 503，不得伪造报告。"""
+def test_evidence_analysis_endpoint_returns_404_for_unknown_repository() -> None:
+    """生产执行器已接线，未知仓库应返回 404 而不是旧的 503。"""
 
     response = TestClient(app).post(
         "/api/v1/changes/evidence/analyze",
         json={
             "request_text": "为订单系统增加取消订单功能",
-            "repository_name": "order_service",
+            "repository_name": "repository_that_does_not_exist",
         },
     )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == ("Evidence-grounded 分析运行时尚未配置。")
+    assert response.status_code == 404
+    assert "不存在" in response.json()["detail"]
 
 
 def test_evidence_analysis_endpoint_converts_contract_error_to_502() -> None:
@@ -283,5 +297,9 @@ def test_evidence_analysis_endpoint_converts_contract_error_to_502() -> None:
 
         assert response.status_code == 502
         assert response.json()["detail"] == "CandidateSet digest 不一致。"
+
     finally:
-        app.dependency_overrides.pop(get_evidence_analysis_executor, None)
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
