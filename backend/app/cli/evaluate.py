@@ -74,7 +74,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="changepilot-evaluate",
-        description="从 Git 历史构建无泄漏样本，并运行 ChangePilot AI 证据驱动评测。",
+        description=("从 Git 历史构建无泄漏样本，并运行 ChangePilot AI 证据驱动评测。"),
     )
 
     parser.add_argument(
@@ -106,7 +106,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
-        help="JSON 报告路径，默认 evals/results/new-retrieval-deterministic-impact.json。",
+        help=("JSON 报告路径，默认 evals/results/new-retrieval-deterministic-impact.json。"),
     )
 
     parser.add_argument(
@@ -184,21 +184,33 @@ def _validate_cli_values(
     if args.scan_limit <= 0:
         raise ValueError("--scan-limit 必须大于 0。")
 
-    if args.experiment_name is not None and not args.experiment_name.strip():
-        raise ValueError("--experiment-name 不能为空。")
+    if args.experiment_name is not None:
+        if not args.experiment_name.strip():
+            raise ValueError("--experiment-name 不能为空。")
 
     if args.output.suffix.casefold() != ".json":
         raise ValueError("--output 必须使用 .json 扩展名。")
 
     for option_name, path in (
-        ("--write-requirement-specs", args.write_requirement_specs),
-        ("--requirement-specs", args.requirement_specs),
+        (
+            "--write-requirement-specs",
+            args.write_requirement_specs,
+        ),
+        (
+            "--requirement-specs",
+            args.requirement_specs,
+        ),
     ):
-        if path is not None and path.suffix.casefold() != ".json":
-            raise ValueError(f"{option_name} 必须使用 .json 扩展名。")
+        if path is not None:
+            if path.suffix.casefold() != ".json":
+                raise ValueError(f"{option_name} 必须使用 .json 扩展名。")
 
-        if path is not None and path.expanduser().resolve() == args.output.expanduser().resolve():
-            raise ValueError(f"{option_name} 不能与 --output 使用同一路径。")
+        if path is not None:
+            resolved_requirement_path = path.expanduser().resolve()
+            resolved_output_path = args.output.expanduser().resolve()
+
+            if resolved_requirement_path == resolved_output_path:
+                raise ValueError(f"{option_name} 不能与 --output 使用同一路径。")
 
 
 def result_to_json_payload(
@@ -227,8 +239,9 @@ def write_evaluation_result(
     if resolved_output.suffix.casefold() != ".json":
         raise ValueError("评测报告必须使用 .json 扩展名。")
 
-    if resolved_output.exists() and resolved_output.is_dir():
-        raise IsADirectoryError(f"评测报告路径是目录：{resolved_output}")
+    if resolved_output.exists():
+        if resolved_output.is_dir():
+            raise IsADirectoryError(f"评测报告路径是目录：{resolved_output}")
 
     resolved_output.parent.mkdir(
         parents=True,
@@ -301,8 +314,8 @@ def run_evaluation_cli(
         model=model,
         requirement_store=requirement_store,
         config=EvidenceImpactAdapterConfig(
-            max_repository_files=args.max_repository_files,
-            max_file_size_bytes=args.max_file_size_bytes,
+            max_repository_files=(args.max_repository_files),
+            max_file_size_bytes=(args.max_file_size_bytes),
             pool_limit=args.pool_limit,
             context_mode=args.context_mode,
         ),
@@ -317,14 +330,23 @@ def run_evaluation_cli(
         dataset,
         adapter,
         experiment_name=experiment_name,
+        # CandidatePool 的构建上限与 pool recall
+        # 的评测截断必须一致。
+        #
+        # 否则传入 --pool-limit 60 后，
+        # 终端仍然会显示 pool_recall@50，
+        # 用户只能再执行一次 rescore 才能看到
+        # 实际的 @60 结果。
+        pool_k=args.pool_limit,
     )
 
     if args.write_requirement_specs is not None:
         if requirement_store is None:
             raise RuntimeError("记录需求工件时未创建 requirement_store。")
 
-        # 只有 15 条样本全部生成需求后才会写文件。
-        # 某条 Requirement Agent 失败时 build_artifact 会拒绝产生部分工件。
+        # 只有全部样本成功生成需求后才写文件。
+        # 某条 Requirement Agent 失败时，
+        # build_artifact 会拒绝产生部分工件。
         write_requirement_artifact(
             requirement_store,
             args.write_requirement_specs,
@@ -362,7 +384,9 @@ def main(
     """命令行进程入口，返回可用于 CI 的退出码。"""
 
     try:
-        result, output_path = run_evaluation_cli(argv)
+        result, output_path = run_evaluation_cli(
+            argv,
+        )
 
     except EvaluationRunInvalidError as exc:
         print(
