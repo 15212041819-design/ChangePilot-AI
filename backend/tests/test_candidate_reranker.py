@@ -1,4 +1,15 @@
-"""CandidatePool 二阶段确定性重排测试。"""
+"""CandidatePool 二阶段确定性重排测试。
+
+本文件验证：
+
+1. 测试文件不会占满最终上下文；
+2. 源码与测试配额能够稳定分配；
+3. 某类文件不足时能够自动补满预算；
+4. 输入顺序变化不会影响最终结果；
+5. 重复 symbol 信号会被封顶；
+6. co-change 信号会应用冻结的 2 倍权重；
+7. 二阶段分数相同时使用原始分数稳定决胜。
+"""
 
 from app.schemas.contracts import (
     Budget,
@@ -73,28 +84,19 @@ def test_reranker_prevents_tests_from_filling_all_context_slots() -> None:
     )
 
     result = rerank_candidate_pool(
-        _pool(
-            (
-                *tests,
-                *sources,
-            )
-        ),
-        budget=Budget(
-            max_files=12,
-        ),
+        _pool((*tests, *sources)),
+        budget=Budget(max_files=12),
     )
 
     assert result.selected_source_count == 10
     assert result.selected_test_count == 2
     assert len(result.selected_paths) == 12
-
     assert sum(path.startswith("app/") for path in result.selected_paths) == 10
-
     assert sum(path.startswith("tests/") for path in result.selected_paths) == 2
 
 
 def test_reranker_preserves_score_order_inside_each_lane() -> None:
-    """源码和测试各自内部必须继续服从第一阶段证据分数。"""
+    """仅有关键词信号时，各类型内部应继续保持稳定的分数顺序。"""
 
     result = rerank_candidate_pool(
         _pool(
@@ -121,9 +123,7 @@ def test_reranker_preserves_score_order_inside_each_lane() -> None:
                 ),
             )
         ),
-        budget=Budget(
-            max_files=4,
-        ),
+        budget=Budget(max_files=4),
     )
 
     assert result.selected_paths == (
@@ -162,9 +162,7 @@ def test_reranker_fills_budget_when_source_candidates_are_insufficient() -> None
                 ),
             )
         ),
-        budget=Budget(
-            max_files=4,
-        ),
+        budget=Budget(max_files=4),
     )
 
     assert set(result.selected_paths) == {
@@ -173,7 +171,6 @@ def test_reranker_fills_budget_when_source_candidates_are_insufficient() -> None
         "tests/test_b.py",
         "tests/test_c.py",
     }
-
     assert len(result.selected_paths) == 4
     assert result.selected_source_count == 1
     assert result.selected_test_count == 3
@@ -207,16 +204,128 @@ def test_reranker_is_stable_when_pool_entry_order_changes() -> None:
 
     first = rerank_candidate_pool(
         _pool(entries),
-        budget=Budget(
-            max_files=3,
-        ),
+        budget=Budget(max_files=3),
     )
 
     second = rerank_candidate_pool(
         _pool(tuple(reversed(entries))),
-        budget=Budget(
-            max_files=3,
-        ),
+        budget=Budget(max_files=3),
     )
 
     assert first == second
+
+
+def test_reranker_caps_repeated_symbol_evidence() -> None:
+    """重复符号命中不能压过同时拥有关键词和符号证据的源码。"""
+
+    repeated_symbol = PoolEntry(
+        path="app/engines/generic.py",
+        kind="source",
+        signals=(
+            SignalScore(
+                name="symbol",
+                value=6.0,
+            ),
+        ),
+        pre_score=6.0,
+        source="baseline",
+    )
+
+    balanced_evidence = PoolEntry(
+        path="app/services/order.py",
+        kind="source",
+        signals=(
+            SignalScore(
+                name="keyword",
+                value=1.7,
+            ),
+            SignalScore(
+                name="symbol",
+                value=2.0,
+            ),
+        ),
+        pre_score=3.7,
+        source="baseline",
+    )
+
+    result = rerank_candidate_pool(
+        _pool(
+            (
+                repeated_symbol,
+                balanced_evidence,
+            )
+        ),
+        budget=Budget(max_files=1),
+    )
+
+    assert result.selected_paths == ("app/services/order.py",)
+
+
+def test_reranker_boosts_cochange_evidence() -> None:
+    """历史共改证据应在第二阶段得到冻结的 2 倍权重。"""
+
+    symbol_only = PoolEntry(
+        path="app/engines/generic.py",
+        kind="source",
+        signals=(
+            SignalScore(
+                name="symbol",
+                value=3.0,
+            ),
+        ),
+        pre_score=3.0,
+        source="baseline",
+    )
+
+    cochange_supported = PoolEntry(
+        path="app/services/order.py",
+        kind="source",
+        signals=(
+            SignalScore(
+                name="keyword",
+                value=0.2,
+            ),
+            SignalScore(
+                name="cochange",
+                value=1.5,
+            ),
+        ),
+        pre_score=1.7,
+        source="baseline",
+    )
+
+    result = rerank_candidate_pool(
+        _pool(
+            (
+                symbol_only,
+                cochange_supported,
+            )
+        ),
+        budget=Budget(max_files=1),
+    )
+
+    assert result.selected_paths == ("app/services/order.py",)
+
+
+def test_reranker_uses_original_score_after_signal_saturation_tie() -> None:
+    """二阶段分数相同时继续使用原始分数和路径稳定决胜。"""
+
+    entries = (
+        _entry(
+            "app/low.py",
+            kind="source",
+            score=4.0,
+        ),
+        _entry(
+            "app/high.py",
+            kind="source",
+            score=5.0,
+        ),
+    )
+
+    result = rerank_candidate_pool(
+        _pool(entries),
+        budget=Budget(max_files=1),
+    )
+
+    assert result.selected_paths == ("app/high.py",)

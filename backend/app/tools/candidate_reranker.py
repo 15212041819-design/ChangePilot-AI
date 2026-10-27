@@ -5,8 +5,8 @@ CandidateSet 预算内平衡源码与测试。基础分数容易让大量测试�
 从而使真正需要分析的业务源码无法进入 Impact/Risk 分支。
 
 本模块不读取评测答案、不调用 LLM，也不修改第一阶段分数。它只依据契约中的
-文件类型和稳定的 ``pre_score`` 执行类型感知的配额选择，并在某一类候选不足时
-自动用剩余候选补满预算。
+文件类型和冻结的证据规则执行类型感知的重排，并在某一类候选不足时自动用
+剩余候选补满预算。
 """
 
 from __future__ import annotations
@@ -21,10 +21,24 @@ from app.schemas.contracts import Budget, CandidatePool, PoolEntry
 TEST_SLOT_DIVISOR = 5
 MAX_RESERVED_TEST_FILES = 2
 
+# 第一阶段的 symbol 信号会随同义词、限定名和签名中的重复命中不断累加。
+# 第二阶段只需要确认“存在强符号证据”，因此把 symbol 最高限制为 3 分，
+# 防止一个文件仅凭重复符号命中挤掉同时拥有多类证据的文件。
+RERANK_SIGNAL_CAPS = {
+    "symbol": 3.0,
+}
+
+# co-change 表示目标文件与需求直接命中文件在历史提交中经常共同变化。
+# 开发样本和留出样本都表明它能补足纯关键词/符号排序的遗漏，因此将其提升为
+# 2 倍权重。其他信号保持第一阶段权重，避免进行没有证据支持的全面调参。
+RERANK_SIGNAL_WEIGHTS = {
+    "cochange": 2.0,
+}
+
 
 @dataclass(frozen=True)
 class CandidateRerankItem:
-    """一个候选在第二阶段选择中的可解释轨迹。"""
+    """一个候选文件在第二阶段选择中的可解释轨迹。"""
 
     path: str
     original_rank: int
@@ -65,12 +79,52 @@ def _reserved_test_slots(
     max_files: int,
     test_count: int,
 ) -> int:
-    """计算测试文件预留位；小预算优先保障业务源码。"""
+    """计算测试文件预留位，小预算优先保障业务源码。"""
 
     return min(
         MAX_RESERVED_TEST_FILES,
         max_files // TEST_SLOT_DIVISOR,
         test_count,
+    )
+
+
+def _rerank_evidence_score(entry: PoolEntry) -> float:
+    """应用冻结的封顶与权重规则，返回稳定的二阶段证据分数。
+
+    处理过程：
+
+    1. 对 symbol 等配置过上限的信号执行封顶；
+    2. 对 co-change 等配置过权重的信号进行加权；
+    3. 对分值排序后求和，避免浮点累加顺序受输入顺序影响；
+    4. 统一保留三位小数，保证跨平台排序稳定。
+    """
+
+    values = sorted(
+        min(
+            signal.value,
+            RERANK_SIGNAL_CAPS.get(signal.name, signal.value),
+        )
+        * RERANK_SIGNAL_WEIGHTS.get(signal.name, 1.0)
+        for signal in entry.signals
+    )
+
+    return round(sum(values), 3)
+
+
+def _stable_source_order(
+    entries: tuple[PoolEntry, ...],
+) -> tuple[PoolEntry, ...]:
+    """按二阶段证据分数、原始分数和路径稳定排列源码。"""
+
+    return tuple(
+        sorted(
+            entries,
+            key=lambda entry: (
+                -_rerank_evidence_score(entry),
+                -round(entry.pre_score, 3),
+                entry.path,
+            ),
+        )
     )
 
 
@@ -83,7 +137,7 @@ def rerank_candidate_pool(
 
     规则如下：
 
-    1. 各类型内部仍严格遵循第一阶段 ``pre_score``；
+    1. 源码内部按冻结的证据封顶和权重规则重排；
     2. 在 12 文件默认预算下，最多为测试文件预留 2 个位置；
     3. 其余位置优先分给 source/config；
     4. 任一类型数量不足时，从全局原始排名中补满剩余预算；
@@ -101,13 +155,17 @@ def rerank_candidate_pool(
             selected_test_count=0,
         )
 
-    source_like = tuple(entry for entry in ordered if entry.kind != "test")
+    # 源码使用二阶段证据规则排序。
+    source_like = _stable_source_order(tuple(entry for entry in ordered if entry.kind != "test"))
+
+    # 测试文件继续沿用第一阶段顺序，避免测试映射结果被再次扰动。
     tests = tuple(entry for entry in ordered if entry.kind == "test")
 
     reserved_test_slots = _reserved_test_slots(
         max_files=limit,
         test_count=len(tests),
     )
+
     source_slots = min(
         limit - reserved_test_slots,
         len(source_like),
@@ -137,6 +195,7 @@ def rerank_candidate_pool(
             start=1,
         )
     }
+
     rerank_rank = {
         entry.path: rank
         for rank, entry in enumerate(
