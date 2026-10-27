@@ -100,6 +100,7 @@ def _print_summary(
     print(f"samples: {report.sample_count}")
     print(f"evaluable_samples: {report.evaluable_sample_count}")
     print(f"score_trace_samples: {report.score_trace_sample_count}")
+    print(f"rerank_trace_samples: {report.rerank_trace_sample_count}")
     print(f"existing_truth_files: {report.existing_truth_count}")
     print(f"pool_recall_micro@{report.pool_k}: {report.pool_recall_micro:.3f}")
     print(f"selection_recall_micro@{report.file_k}: {report.selection_recall_micro:.3f}")
@@ -107,6 +108,10 @@ def _print_summary(
     print(f"missing_from_pool: {report.missing_from_pool_count}")
     print(f"missed_after_ranking: {report.missed_after_ranking_count}")
     print(f"false_positive_selections: {report.false_positive_selected_count}")
+    print(f"rerank_promoted_truth: {report.rerank_promoted_truth_count}")
+    print(f"rerank_demoted_truth: {report.rerank_demoted_truth_count}")
+    print(f"rerank_unchanged_truth: {report.rerank_unchanged_truth_count}")
+    print(f"rerank_rejected_truth: {report.rerank_rejected_truth_count}")
 
     worst = sorted(
         (item for item in report.diagnostics if item.evaluable),
@@ -140,10 +145,17 @@ def _print_summary(
             print(
                 "  missed_truth: "
                 f"{truth.path} "
-                f"rank={truth.pool_rank} "
+                f"outcome={truth.outcome} "
+                f"pool_rank={truth.pool_rank} "
+                f"rerank_rank={truth.rerank_rank} "
+                f"lane={truth.rerank_lane} "
+                f"rank_delta={truth.rank_delta} "
                 f"score={truth.total_score} "
                 f"signals={signal_values}"
             )
+
+        if not item.rerank_trace_available:
+            print("  rerank_evidence: unavailable (legacy or semantic report)")
 
         for trace in item.false_positive_score_traces[:3]:
             signal_values = {signal.name: signal.value for signal in trace.signals}

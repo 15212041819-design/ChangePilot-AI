@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from app.schemas.evaluation_metrics import (
+    CandidateRerankLane,
+    CandidateRerankTrace,
     CandidateScoreTrace,
     CandidateSignalName,
     CandidateSignalTrace,
@@ -17,6 +19,7 @@ from app.schemas.ranking_diagnostics import (
     RankingDiagnosticsReport,
     SampleRankingDiagnostic,
     TruthPathRanking,
+    TruthSelectionOutcome,
 )
 
 
@@ -88,7 +91,12 @@ def _paths(
 
     paths: list[str] = []
 
-    for index, item in enumerate(_sequence(value, field_name=field_name)):
+    for index, item in enumerate(
+        _sequence(
+            value,
+            field_name=field_name,
+        )
+    ):
         if not isinstance(item, str) or not item.strip():
             raise RankingDiagnosticsError(f"{field_name}[{index}] 必须是非空字符串。")
 
@@ -191,6 +199,94 @@ def _score_traces(
     return result
 
 
+def _rerank_traces(
+    observation: Mapping[str, Any] | None,
+    pool_paths: tuple[str, ...],
+    selected_paths: tuple[str, ...],
+) -> tuple[CandidateRerankTrace, ...]:
+    """读取二阶段重排轨迹；旧报告没有该字段时返回空元组。"""
+
+    if observation is None:
+        return ()
+
+    raw_traces = _sequence(
+        observation.get("candidate_rerank_traces", ()),
+        field_name="candidate_rerank_traces",
+    )
+    traces: list[CandidateRerankTrace] = []
+
+    for trace_index, raw_trace in enumerate(raw_traces):
+        prefix = f"candidate_rerank_traces[{trace_index}]"
+        trace = _mapping(
+            raw_trace,
+            field_name=prefix,
+        )
+        lane = _string(
+            trace.get("lane"),
+            field_name=f"{prefix}.lane",
+        )
+
+        if lane not in {"source", "test"}:
+            raise RankingDiagnosticsError(f"{prefix}.lane 非法：{lane}")
+
+        selected = trace.get("selected")
+
+        if not isinstance(selected, bool):
+            raise RankingDiagnosticsError(f"{prefix}.selected 必须是布尔值。")
+
+        raw_rerank_rank = trace.get("rerank_rank")
+        rerank_rank = (
+            None
+            if raw_rerank_rank is None
+            else _integer(
+                raw_rerank_rank,
+                field_name=f"{prefix}.rerank_rank",
+            )
+        )
+
+        traces.append(
+            CandidateRerankTrace(
+                path=_string(
+                    trace.get("path"),
+                    field_name=f"{prefix}.path",
+                ),
+                original_rank=_integer(
+                    trace.get("original_rank"),
+                    field_name=f"{prefix}.original_rank",
+                ),
+                rerank_rank=rerank_rank,
+                pre_score=_number(
+                    trace.get("pre_score"),
+                    field_name=f"{prefix}.pre_score",
+                ),
+                lane=cast(CandidateRerankLane, lane),
+                selected=selected,
+            )
+        )
+
+    result = tuple(traces)
+
+    if not result:
+        return result
+
+    if tuple(trace.path for trace in result) != pool_paths:
+        raise RankingDiagnosticsError("candidate_rerank_traces 必须逐项对应 candidate_pool_paths。")
+
+    if tuple(trace.original_rank for trace in result) != tuple(range(1, len(result) + 1)):
+        raise RankingDiagnosticsError("重排轨迹 original_rank 必须从 1 连续递增。")
+
+    selected_traces = tuple(trace for trace in result if trace.selected)
+    rerank_ranks = tuple(sorted(cast(int, trace.rerank_rank) for trace in selected_traces))
+
+    if rerank_ranks != tuple(range(1, len(selected_traces) + 1)):
+        raise RankingDiagnosticsError("重排轨迹 rerank_rank 必须从 1 连续递增。")
+
+    if {trace.path for trace in selected_traces} != set(selected_paths):
+        raise RankingDiagnosticsError("重排轨迹的选中文件集合必须等于 selected_paths。")
+
+    return result
+
+
 def _ratio(numerator: int, denominator: int) -> float:
     """返回稳定的六位小数比例。"""
 
@@ -214,7 +310,11 @@ def load_ranking_source(
         raise IsADirectoryError(f"评测报告路径不是文件：{resolved}")
 
     try:
-        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        payload = json.loads(
+            resolved.read_text(
+                encoding="utf-8",
+            )
+        )
     except json.JSONDecodeError as exc:
         raise RankingDiagnosticsError(f"评测报告不是合法 JSON：{exc}") from exc
 
@@ -328,7 +428,13 @@ def _sample_diagnostic(
         observation,
         pool_paths,
     )
+    rerank_traces = _rerank_traces(
+        observation,
+        pool_paths,
+        selected_paths,
+    )
     traces_by_path = {trace.path: trace for trace in score_traces}
+    rerank_by_path = {trace.path: trace for trace in rerank_traces}
 
     pool_cutoff = pool_paths[:pool_k]
     selection_cutoff = selected_paths[:file_k]
@@ -339,18 +445,50 @@ def _sample_diagnostic(
 
     for path in truth:
         score_trace = traces_by_path.get(path)
+        rerank_trace = rerank_by_path.get(path)
+        pool_rank = _rank(path, pool_paths)
+        within_pool_cutoff = path in pool_set
+        selection_rank = _rank(
+            path,
+            selection_cutoff,
+        )
+
+        outcome: TruthSelectionOutcome
+
+        if selection_rank is not None:
+            outcome = "selected"
+        elif pool_rank is None:
+            outcome = "not_in_pool"
+        elif not within_pool_cutoff:
+            outcome = "below_pool_cutoff"
+        elif rerank_trace is not None and not rerank_trace.selected:
+            outcome = "rerank_rejected"
+        elif rerank_trace is not None:
+            outcome = "below_selection_cutoff"
+        else:
+            outcome = "selection_untraced"
 
         rankings.append(
             TruthPathRanking(
                 path=path,
-                pool_rank=_rank(path, pool_paths),
-                within_pool_cutoff=path in pool_set,
-                selection_rank=_rank(
-                    path,
-                    selection_cutoff,
-                ),
+                pool_rank=pool_rank,
+                within_pool_cutoff=within_pool_cutoff,
+                selection_rank=selection_rank,
                 total_score=(score_trace.total_score if score_trace else None),
                 signals=(score_trace.signals if score_trace else ()),
+                outcome=outcome,
+                rerank_rank=(rerank_trace.rerank_rank if rerank_trace else None),
+                rerank_lane=(rerank_trace.lane if rerank_trace else None),
+                rerank_selected=(rerank_trace.selected if rerank_trace else None),
+                rank_delta=(
+                    pool_rank - rerank_trace.rerank_rank
+                    if (
+                        rerank_trace is not None
+                        and rerank_trace.rerank_rank is not None
+                        and pool_rank is not None
+                    )
+                    else None
+                ),
             )
         )
 
@@ -400,6 +538,7 @@ def _sample_diagnostic(
         missed_after_ranking=missed_after_ranking,
         false_positive_selections=false_positives,
         score_trace_available=bool(score_traces),
+        rerank_trace_available=bool(rerank_traces),
         false_positive_score_traces=(false_positive_score_traces),
     )
 
@@ -479,7 +618,7 @@ def build_ranking_diagnostics(
     selected_hit_count = existing_truth_count - missing_pool_count - missed_ranking_count
 
     return RankingDiagnosticsReport(
-        schema_version="1.0",
+        schema_version="1.1",
         experiment_name=_string(
             payload.get("experiment_name"),
             field_name="experiment_name",
@@ -490,6 +629,7 @@ def build_ranking_diagnostics(
         sample_count=len(diagnostics),
         evaluable_sample_count=len(evaluable),
         score_trace_sample_count=sum(item.score_trace_available for item in diagnostics),
+        rerank_trace_sample_count=sum(item.rerank_trace_available for item in diagnostics),
         perfect_selection_sample_count=sum(item.selection_recall == 1.0 for item in evaluable),
         existing_truth_count=existing_truth_count,
         pool_hit_count=pool_hit_count,
@@ -498,6 +638,18 @@ def build_ranking_diagnostics(
         missed_after_ranking_count=missed_ranking_count,
         false_positive_selected_count=sum(
             len(item.false_positive_selections) for item in diagnostics
+        ),
+        rerank_promoted_truth_count=sum(
+            (truth.rank_delta or 0) > 0 for item in diagnostics for truth in item.truth_rankings
+        ),
+        rerank_demoted_truth_count=sum(
+            (truth.rank_delta or 0) < 0 for item in diagnostics for truth in item.truth_rankings
+        ),
+        rerank_unchanged_truth_count=sum(
+            truth.rank_delta == 0 for item in diagnostics for truth in item.truth_rankings
+        ),
+        rerank_rejected_truth_count=sum(
+            truth.rerank_selected is False for item in diagnostics for truth in item.truth_rankings
         ),
         pool_recall_micro=_ratio(
             pool_hit_count,

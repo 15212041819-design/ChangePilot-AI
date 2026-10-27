@@ -94,6 +94,32 @@ def _report(path: Path) -> None:
                         ],
                     },
                 ],
+                "candidate_rerank_traces": [
+                    {
+                        "path": "app/service.py",
+                        "original_rank": 1,
+                        "rerank_rank": 1,
+                        "pre_score": 4.0,
+                        "lane": "source",
+                        "selected": True,
+                    },
+                    {
+                        "path": "app/unrelated.py",
+                        "original_rank": 2,
+                        "rerank_rank": 2,
+                        "pre_score": 2.0,
+                        "lane": "source",
+                        "selected": True,
+                    },
+                    {
+                        "path": "app/model.py",
+                        "original_rank": 3,
+                        "rerank_rank": None,
+                        "pre_score": 1.0,
+                        "lane": "source",
+                        "selected": False,
+                    },
+                ],
             },
             {
                 "sample_id": "sample-2",
@@ -114,6 +140,16 @@ def _report(path: Path) -> None:
                         ],
                     }
                 ],
+                "candidate_rerank_traces": [
+                    {
+                        "path": "app/service.py",
+                        "original_rank": 1,
+                        "rerank_rank": None,
+                        "pre_score": 1.0,
+                        "lane": "source",
+                        "selected": False,
+                    }
+                ],
             },
         ],
         "metrics": {
@@ -121,6 +157,7 @@ def _report(path: Path) -> None:
             "file_k": 12,
         },
     }
+
     path.write_text(
         json.dumps(payload),
         encoding="utf-8",
@@ -147,6 +184,11 @@ def test_build_ranking_diagnostics_separates_pool_and_ranking_misses(
     assert report.missed_after_ranking_count == 1
     assert report.false_positive_selected_count == 1
     assert report.score_trace_sample_count == 2
+    assert report.rerank_trace_sample_count == 2
+    assert report.rerank_unchanged_truth_count == 1
+    assert report.rerank_rejected_truth_count == 1
+    assert report.rerank_promoted_truth_count == 0
+    assert report.rerank_demoted_truth_count == 0
 
     assert first.missed_after_ranking == ("app/model.py",)
     assert first.false_positive_selections == ("app/unrelated.py",)
@@ -154,6 +196,10 @@ def test_build_ranking_diagnostics_separates_pool_and_ranking_misses(
     assert first.truth_rankings[0].selection_rank is None
     assert first.truth_rankings[0].total_score == 1.0
     assert first.truth_rankings[0].signals[0].name == "dep_closure"
+    assert first.truth_rankings[0].outcome == "rerank_rejected"
+    assert first.truth_rankings[0].rerank_lane == "source"
+    assert first.truth_rankings[0].rerank_selected is False
+    assert first.truth_rankings[0].rerank_rank is None
     assert first.false_positive_score_traces[0].path == "app/unrelated.py"
     assert first.false_positive_score_traces[0].total_score == 2.0
 
@@ -175,6 +221,38 @@ def test_pool_cutoff_can_expose_retrieval_miss(
     assert report.missing_from_pool_count == 1
     assert report.missed_after_ranking_count == 0
     assert report.diagnostics[0].missing_from_pool == ("app/model.py",)
+    assert report.diagnostics[0].truth_rankings[0].outcome == "below_pool_cutoff"
+
+
+def test_legacy_report_without_rerank_traces_remains_supported(
+    tmp_path: Path,
+) -> None:
+    """旧报告没有重排轨迹时仍可诊断，但必须显式标记证据不可用。"""
+
+    source = tmp_path / "legacy-rerank.json"
+    _report(source)
+
+    payload = json.loads(
+        source.read_text(
+            encoding="utf-8",
+        )
+    )
+
+    for observation in payload["observations"]:
+        observation.pop("candidate_rerank_traces")
+
+    source.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    report = build_ranking_diagnostics(source)
+    first = report.diagnostics[0]
+
+    assert report.rerank_trace_sample_count == 0
+    assert first.rerank_trace_available is False
+    assert first.truth_rankings[0].outcome == "selection_untraced"
+    assert first.truth_rankings[0].rerank_selected is None
 
 
 def test_old_report_requires_rescore_before_diagnostics(
@@ -185,8 +263,13 @@ def test_old_report_requires_rescore_before_diagnostics(
     source = tmp_path / "old.json"
     _report(source)
 
-    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload = json.loads(
+        source.read_text(
+            encoding="utf-8",
+        )
+    )
     payload["dataset"]["samples"][0].pop("existing_source_files")
+
     source.write_text(
         json.dumps(payload),
         encoding="utf-8",
@@ -221,7 +304,15 @@ def test_cli_writes_json_and_rejects_source_overwrite(
 
     assert written == output.resolve()
     assert limit == 3
-    assert json.loads(output.read_text(encoding="utf-8"))["selected_hit_count"] == 1
+
+    rendered = json.loads(
+        output.read_text(
+            encoding="utf-8",
+        )
+    )
+    assert rendered["selected_hit_count"] == 1
+    assert rendered["schema_version"] == "1.1"
+    assert rendered["rerank_rejected_truth_count"] == 1
 
     with pytest.raises(
         ValueError,
