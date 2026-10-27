@@ -1,5 +1,6 @@
-"""“新检索 + 确定性 Impact 引擎”评测适配器测试。"""
+"""证据驱动 Impact 评测适配器测试。"""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -42,8 +43,12 @@ def _model_response() -> str:
         "entity_hints": [
             {
                 "concept": "取消订单",
-                "lexical_variants": ["cancel order"],
-                "symbol_candidates": ["cancel_order"],
+                "lexical_variants": [
+                    "cancel order"
+                ],
+                "symbol_candidates": [
+                    "cancel_order"
+                ],
                 "role": "action_target"
             }
         ],
@@ -53,6 +58,33 @@ def _model_response() -> str:
     """
 
 
+def _model_response_with_assumption() -> str:
+    """返回包含未确认假设的需求结果，模拟真实历史提交评测。"""
+
+    return _model_response().replace(
+        '"assumptions": []',
+        ('"assumptions": [{"text": "默认沿用现有订单权限模型。"}]'),
+    )
+
+
+def _semantic_decision(
+    *selected_paths: str,
+) -> str:
+    """返回不扩池、只选择真实候选路径的语义映射结果。"""
+
+    return json.dumps(
+        {
+            "needs_more_context": False,
+            "selected_paths": list(
+                selected_paths,
+            ),
+            "queries": [],
+            "explanation": ("根据需求实体、符号和依赖证据选择目标文件。"),
+        },
+        ensure_ascii=False,
+    )
+
+
 def _context(
     tmp_path: Path,
 ) -> EvaluationCaseContext:
@@ -60,12 +92,15 @@ def _context(
 
     commit = "a" * 40
     repository = tmp_path / "order_service"
+
     service = repository / "order_app" / "service.py"
+
     test_file = repository / "tests" / "test_service.py"
 
     service.parent.mkdir(
         parents=True,
     )
+
     test_file.parent.mkdir(
         parents=True,
     )
@@ -112,7 +147,7 @@ def _context(
         pairs=(),
         history_truncated=False,
         pairs_truncated=False,
-        history_digest=(ZERO_HISTORY_DIGEST),
+        history_digest=ZERO_HISTORY_DIGEST,
     )
 
     return EvaluationCaseContext(
@@ -126,21 +161,34 @@ def _context(
 def test_adapter_runs_real_retrieval_guard_and_impact_engine(
     tmp_path: Path,
 ) -> None:
-    """真实链路应召回并报告仓库中存在的目标源码文件。"""
+    """确定性模式应召回并报告仓库中存在的目标源码文件。"""
 
     adapter = create_evidence_impact_adapter(
-        model=FakeListChatModel(responses=[_model_response()]),
+        model=FakeListChatModel(
+            responses=[
+                _model_response(),
+            ]
+        ),
     )
 
-    observation = adapter(_context(tmp_path))
+    observation = adapter(
+        _context(tmp_path),
+    )
 
     assert observation.status == "success"
+
     assert "order_app/service.py" in observation.candidate_pool_paths
+
     assert "order_app/service.py" in observation.selected_paths
+
     assert observation.reported_paths == ("order_app/service.py",)
+
     assert observation.invalid_reported_paths == ()
+
     assert observation.analyzed_item_count >= 1
+
     assert observation.assigned_item_count >= observation.analyzed_item_count
+
     assert observation.latency_ms >= 0
 
     # 评分轨迹必须完整对应候选池顺序。
@@ -159,12 +207,14 @@ def test_adapter_runs_real_retrieval_guard_and_impact_engine(
     service_trace = next(
         trace
         for trace in (observation.candidate_score_traces)
-        if (trace.path == "order_app/service.py")
+        if trace.path == "order_app/service.py"
     )
+
     service_signals = {signal.name: signal.value for signal in service_trace.signals}
 
     assert "keyword" in service_signals
     assert "symbol" in service_signals
+
     assert service_trace.total_score == round(
         sum(service_signals.values()),
         3,
@@ -180,15 +230,19 @@ def test_adapter_indexes_python_only_once(
     import app.tools.evidence_evaluation_adapter as adapter_module
 
     real_indexer = adapter_module.index_python_symbols
+
     call_count = 0
 
     def counting_indexer(
         repository: object,
     ) -> object:
         nonlocal call_count
+
         call_count += 1
 
-        return real_indexer(repository)
+        return real_indexer(
+            repository,
+        )
 
     monkeypatch.setattr(
         adapter_module,
@@ -197,12 +251,58 @@ def test_adapter_indexes_python_only_once(
     )
 
     adapter = EvidenceGroundedImpactEvaluationAdapter(
-        model=FakeListChatModel(responses=[_model_response()]),
+        model=FakeListChatModel(
+            responses=[
+                _model_response(),
+            ]
+        ),
     )
 
-    adapter(_context(tmp_path))
+    adapter(
+        _context(tmp_path),
+    )
 
     assert call_count == 1
+
+
+def test_adapter_runs_semantic_context_mode_without_changing_impact_engine(
+    tmp_path: Path,
+) -> None:
+    """语义模式应使用 Agent 选文件，但继续复用确定性 Impact 引擎。"""
+
+    adapter = create_evidence_impact_adapter(
+        model=FakeListChatModel(
+            responses=[
+                _model_response_with_assumption(),
+                _semantic_decision(
+                    "order_app/service.py",
+                ),
+            ]
+        ),
+        config=EvidenceImpactAdapterConfig(
+            context_mode="semantic",
+        ),
+    )
+
+    observation = adapter(
+        _context(tmp_path),
+    )
+
+    assert observation.status == "success"
+
+    assert "order_app/service.py" in observation.candidate_pool_paths
+
+    assert observation.selected_paths == ("order_app/service.py",)
+
+    assert observation.reported_paths == ("order_app/service.py",)
+
+    assert observation.invalid_reported_paths == ()
+
+    # 语义重排不能破坏候选池评分证据。
+    assert (
+        tuple(trace.path for trace in (observation.candidate_score_traces))
+        == observation.candidate_pool_paths
+    )
 
 
 def test_adapter_rejects_empty_repository(
@@ -212,6 +312,7 @@ def test_adapter_rejects_empty_repository(
 
     commit = "a" * 40
     repository = tmp_path / "empty"
+
     repository.mkdir()
 
     sample = EvaluationSample(
@@ -246,7 +347,11 @@ def test_adapter_rejects_empty_repository(
     )
 
     adapter = create_evidence_impact_adapter(
-        model=FakeListChatModel(responses=[_model_response()]),
+        model=FakeListChatModel(
+            responses=[
+                _model_response(),
+            ]
+        ),
     )
 
     with pytest.raises(
@@ -299,4 +404,18 @@ def test_adapter_config_rejects_invalid_limits(
         ValueError,
         match=message,
     ):
-        EvidenceImpactAdapterConfig(**values)
+        EvidenceImpactAdapterConfig(
+            **values,
+        )
+
+
+def test_adapter_config_rejects_unknown_context_mode() -> None:
+    """未知模式必须在扫描仓库和调用模型前被拒绝。"""
+
+    with pytest.raises(
+        ValueError,
+        match="context_mode",
+    ):
+        EvidenceImpactAdapterConfig(
+            context_mode="unknown",  # type: ignore[arg-type]
+        )

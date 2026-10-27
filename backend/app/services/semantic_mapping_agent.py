@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -40,6 +41,7 @@ from app.tools.contract_digest import (
 )
 
 MAX_TOOL_RESULTS = 10
+MAX_DECISION_REPAIR_ATTEMPTS = 1
 
 SYSTEM_PROMPT = """
 你是 ChangePilot AI 的 Semantic Mapping Agent。
@@ -57,6 +59,12 @@ SYSTEM_PROMPT = """
 5. needs_more_context=true 时只输出 queries，不输出 selected_paths。
 6. needs_more_context=false 时只输出 selected_paths，不再请求工具。
 7. 优先选择有符号、依赖或测试证据的文件，不要为了填满预算而选择无关文件。
+8. selected_paths 数量不得超过输入 selection_budget.max_selected_files。
+9. search_identifiers 只能提供 terms；expand_callers 和 read_signature 只能提供
+   symbol；list_module_symbols 只能提供 module。不要给工具附加无关参数。
+10. repair_feedback 非空时，必须只修正其中指出的契约错误，不得忽略预算。
+11. force_finalize=true 时扩池预算已经结束，必须返回 needs_more_context=false、
+    空 queries 和不超过文件预算的 selected_paths，不得继续请求工具。
 
 请严格按以下格式返回，不要输出额外说明：
 
@@ -76,9 +84,15 @@ class SemanticMappingResult:
 
     candidate_set: CandidateSet
 
-    decisions: tuple[SemanticMappingDecision, ...]
+    decisions: tuple[
+        SemanticMappingDecision,
+        ...,
+    ]
 
-    tool_traces: tuple[SemanticToolTrace, ...]
+    tool_traces: tuple[
+        SemanticToolTrace,
+        ...,
+    ]
 
     query_count: int
 
@@ -88,7 +102,12 @@ def _known_repository_paths(
 ) -> set[str]:
     """返回快照中可被扩池工具返回的真实路径。"""
 
-    return {normalize_digest_path(item.relative_path) for item in repository.files}
+    return {
+        normalize_digest_path(
+            item.relative_path,
+        )
+        for item in repository.files
+    }
 
 
 def _candidate_from_indexed_file(
@@ -103,7 +122,11 @@ def _candidate_from_indexed_file(
     return ExpansionCandidate(
         path=normalize_digest_path(path),
         kind=classify_file_kind(path),
-        symbols=tuple(sorted(set(symbols)))[:10],
+        symbols=tuple(
+            sorted(
+                set(symbols),
+            )
+        )[:10],
         signals=(
             SignalScore(
                 name=signal_name,
@@ -116,7 +139,10 @@ def _candidate_from_indexed_file(
 def _search_identifiers(
     query: SemanticQuery,
     symbol_index: RepositorySymbolIndex,
-) -> tuple[ExpansionCandidate, ...]:
+) -> tuple[
+    ExpansionCandidate,
+    ...,
+]:
     """在真实模块名、符号名和声明签名中查找关键词。"""
 
     terms = tuple(sorted({term.strip().casefold() for term in query.terms if term.strip()}))
@@ -133,7 +159,7 @@ def _search_identifiers(
                 indexed_file.module_name,
                 *(
                     value
-                    for symbol in indexed_file.symbols
+                    for symbol in (indexed_file.symbols)
                     for value in (
                         symbol.name,
                         symbol.qualified_name,
@@ -153,7 +179,7 @@ def _search_identifiers(
                 path=indexed_file.file_path,
                 symbols=tuple(
                     symbol.qualified_name
-                    for symbol in indexed_file.symbols
+                    for symbol in (indexed_file.symbols)
                     if any(
                         term
                         in (
@@ -205,7 +231,10 @@ def _matching_symbols(
 def _read_signature(
     query: SemanticQuery,
     symbol_index: RepositorySymbolIndex,
-) -> tuple[ExpansionCandidate, ...]:
+) -> tuple[
+    ExpansionCandidate,
+    ...,
+]:
     """通过符号索引返回定义文件和真实签名证据。"""
 
     assert query.symbol is not None
@@ -217,17 +246,22 @@ def _read_signature(
             signal_name="symbol",
             signal_value=2.5,
         )
-        for indexed_file, symbol in _matching_symbols(
-            symbol_index,
-            query.symbol,
-        )[:MAX_TOOL_RESULTS]
+        for indexed_file, symbol in (
+            _matching_symbols(
+                symbol_index,
+                query.symbol,
+            )[:MAX_TOOL_RESULTS]
+        )
     )
 
 
 def _list_module_symbols(
     query: SemanticQuery,
     symbol_index: RepositorySymbolIndex,
-) -> tuple[ExpansionCandidate, ...]:
+) -> tuple[
+    ExpansionCandidate,
+    ...,
+]:
     """列出一个真实 Python 模块定义的符号。"""
 
     assert query.module is not None
@@ -237,7 +271,7 @@ def _list_module_symbols(
     return tuple(
         _candidate_from_indexed_file(
             path=indexed_file.file_path,
-            symbols=tuple(symbol.qualified_name for symbol in indexed_file.symbols),
+            symbols=tuple(symbol.qualified_name for symbol in (indexed_file.symbols)),
             signal_name="symbol",
             signal_value=2.0,
         )
@@ -245,7 +279,7 @@ def _list_module_symbols(
             symbol_index.files,
             key=lambda item: item.file_path,
         )
-        if indexed_file.module_name.casefold() == requested
+        if (indexed_file.module_name.casefold() == requested)
     )[:MAX_TOOL_RESULTS]
 
 
@@ -253,7 +287,10 @@ def _expand_callers(
     query: SemanticQuery,
     symbol_index: RepositorySymbolIndex,
     dependency_graph: RepositoryDependencyGraph,
-) -> tuple[ExpansionCandidate, ...]:
+) -> tuple[
+    ExpansionCandidate,
+    ...,
+]:
     """返回符号定义文件及直接导入该模块的仓库文件。"""
 
     assert query.symbol is not None
@@ -264,26 +301,35 @@ def _expand_callers(
     )
 
     definitions = {
-        normalize_digest_path(indexed_file.file_path): tuple(
+        normalize_digest_path(
+            indexed_file.file_path,
+        ): tuple(
             symbol.qualified_name
             for file_item, symbol in matches
-            if file_item.file_path == indexed_file.file_path
+            if (file_item.file_path == indexed_file.file_path)
         )
         for indexed_file, _ in matches
     }
 
-    paths: dict[str, tuple[str, ...]] = dict(definitions)
+    paths: dict[
+        str,
+        tuple[str, ...],
+    ] = dict(definitions)
 
     for dependency in dependency_graph.dependencies:
         if dependency.kind != "internal" or dependency.target_file is None:
             continue
 
-        target_path = normalize_digest_path(dependency.target_file)
+        target_path = normalize_digest_path(
+            dependency.target_file,
+        )
 
         if target_path not in definitions:
             continue
 
-        source_path = normalize_digest_path(dependency.source_file)
+        source_path = normalize_digest_path(
+            dependency.source_file,
+        )
 
         paths.setdefault(
             source_path,
@@ -306,7 +352,10 @@ def execute_semantic_query(
     *,
     symbol_index: RepositorySymbolIndex,
     dependency_graph: RepositoryDependencyGraph,
-) -> tuple[ExpansionCandidate, ...]:
+) -> tuple[
+    ExpansionCandidate,
+    ...,
+]:
     """执行一次无副作用的白名单仓库查询。"""
 
     if query.tool == "search_identifiers":
@@ -337,24 +386,36 @@ def execute_semantic_query(
 def _prompt_payload(
     requirement: RequirementSpec,
     pool: CandidatePool,
-    traces: tuple[SemanticToolTrace, ...],
+    traces: tuple[
+        SemanticToolTrace,
+        ...,
+    ],
+    *,
+    budget: Budget,
+    repair_feedback: str | None,
+    force_finalize: bool,
 ) -> str:
     """构造不包含仓库源码全文的最小模型上下文。"""
 
     payload = {
         "requirement": {
-            "summary": requirement.summary,
-            "change_type": requirement.change_type,
+            "summary": (requirement.summary),
+            "change_type": (requirement.change_type),
             "acceptance_criteria": [
                 {
                     "id": item.id,
-                    "description": item.description,
-                    "priority": item.priority,
+                    "description": (item.description),
+                    "priority": (item.priority),
                 }
-                for item in requirement.acceptance_criteria
+                for item in (requirement.acceptance_criteria)
                 if item.status == "active"
             ],
-            "entity_hints": [item.model_dump(mode="json") for item in requirement.entity_hints],
+            "entity_hints": [
+                item.model_dump(
+                    mode="json",
+                )
+                for item in (requirement.entity_hints)
+            ],
             "constraints": list(requirement.constraints),
         },
         "candidate_pool": [
@@ -362,17 +423,32 @@ def _prompt_payload(
                 "path": entry.path,
                 "kind": entry.kind,
                 "symbols": list(entry.symbols),
-                "signals": [signal.model_dump(mode="json") for signal in entry.signals],
-                "pre_score": entry.pre_score,
+                "signals": [
+                    signal.model_dump(
+                        mode="json",
+                    )
+                    for signal in (entry.signals)
+                ],
+                "pre_score": (entry.pre_score),
                 "source": entry.source,
             }
             for entry in pool.entries
         ],
-        "tool_history": [trace.model_dump(mode="json") for trace in traces],
+        "tool_history": [
+            trace.model_dump(
+                mode="json",
+            )
+            for trace in traces
+        ],
         "remaining_budget": {
             "rounds": (MAX_EXPANSION_ROUNDS - pool.expansion_rounds_used),
             "queries": (MAX_EXPANSION_QUERIES - len(pool.expansion_records)),
         },
+        "selection_budget": {
+            "max_selected_files": (budget.max_files),
+        },
+        "repair_feedback": (repair_feedback),
+        "force_finalize": (force_finalize),
     }
 
     return json.dumps(
@@ -386,13 +462,19 @@ def _invoke_mapping_model(
     *,
     requirement: RequirementSpec,
     pool: CandidatePool,
-    traces: tuple[SemanticToolTrace, ...],
+    traces: tuple[
+        SemanticToolTrace,
+        ...,
+    ],
+    budget: Budget,
+    repair_feedback: str | None,
+    force_finalize: bool,
     model: BaseChatModel,
 ) -> SemanticMappingDecision:
     """调用一轮结构化 Semantic Mapping 决策。"""
 
     parser = PydanticOutputParser(
-        pydantic_object=SemanticMappingDecision,
+        pydantic_object=(SemanticMappingDecision),
     )
 
     prompt = ChatPromptTemplate.from_messages(
@@ -403,7 +485,7 @@ def _invoke_mapping_model(
             ),
             (
                 "human",
-                "请分析以下需求、候选池和工具历史：\n\n{payload}",
+                ("请分析以下需求、候选池和工具历史：\n\n{payload}"),
             ),
         ]
     )
@@ -416,10 +498,134 @@ def _invoke_mapping_model(
                 requirement,
                 pool,
                 traces,
+                budget=budget,
+                repair_feedback=(repair_feedback),
+                force_finalize=(force_finalize),
             ),
             "format_instructions": (parser.get_format_instructions()),
         }
     )
+
+
+def _selection_budget_error(
+    decision: SemanticMappingDecision,
+    budget: Budget,
+) -> str | None:
+    """返回最终文件选择超过预算时的稳定错误信息。"""
+
+    if decision.needs_more_context:
+        return None
+
+    selected_count = len(
+        decision.selected_paths,
+    )
+
+    if selected_count <= budget.max_files:
+        return None
+
+    return (
+        "selected_paths 超过 CandidateSet "
+        "文件预算："
+        f"selected={selected_count}, "
+        f"maximum={budget.max_files}。"
+    )
+
+
+def _forced_finalization_error(
+    decision: SemanticMappingDecision,
+    *,
+    force_finalize: bool,
+) -> str | None:
+    """强制收敛轮不允许模型继续申请仓库工具。"""
+
+    if not force_finalize or not decision.needs_more_context:
+        return None
+
+    return (
+        "扩池预算已经结束，强制收敛轮必须返回 "
+        "needs_more_context=false、空 queries "
+        "和最终 selected_paths。"
+    )
+
+
+def _invoke_mapping_model_with_repair(
+    *,
+    requirement: RequirementSpec,
+    pool: CandidatePool,
+    traces: tuple[
+        SemanticToolTrace,
+        ...,
+    ],
+    budget: Budget,
+    model: BaseChatModel,
+    force_finalize: bool = False,
+) -> SemanticMappingDecision:
+    """调用一轮决策，并允许 LLM 契约错误修正一次。
+
+    修正只对 LLM 分支开放，且不会静默删除字段、截断路径或放宽预算。
+    第一次错误会作为 ``repair_feedback`` 返回同一节点；
+    第二次仍错误则正式失败。
+    """
+
+    repair_feedback: str | None = None
+
+    for attempt in range(
+        MAX_DECISION_REPAIR_ATTEMPTS + 1,
+    ):
+        try:
+            decision = _invoke_mapping_model(
+                requirement=requirement,
+                pool=pool,
+                traces=traces,
+                budget=budget,
+                repair_feedback=(repair_feedback),
+                force_finalize=(force_finalize),
+                model=model,
+            )
+
+        except OutputParserException as exc:
+            if attempt >= MAX_DECISION_REPAIR_ATTEMPTS:
+                raise SemanticMappingValidationError(
+                    "Semantic Mapping 结构化输出修正一次后仍不合法。"
+                ) from exc
+
+            # 只返回契约错误，不自动修改模型输出。
+            # 限制异常文本长度，避免把异常堆栈
+            # 无限放大到下一轮提示。
+            repair_feedback = (
+                "上一轮输出未通过 "
+                "SemanticMappingDecision 契约。"
+                "请严格删除工具不允许的参数，"
+                "并重新输出完整 JSON。"
+                f"错误：{str(exc)[:2000]}"
+            )
+
+            continue
+
+        decision_error = _forced_finalization_error(
+            decision,
+            force_finalize=(force_finalize),
+        ) or _selection_budget_error(
+            decision,
+            budget,
+        )
+
+        if decision_error is None:
+            return decision
+
+        if attempt >= MAX_DECISION_REPAIR_ATTEMPTS:
+            if force_finalize and decision.needs_more_context:
+                raise SemanticMappingValidationError(decision_error + "模型修正一次后仍未收敛。")
+
+            raise SemanticMappingValidationError(decision_error + "模型修正一次后仍超过预算。")
+
+        repair_feedback = (
+            decision_error + "请只保留证据最强的文件，"
+            "重新输出完整 JSON；"
+            "不得自行发明新路径或继续请求工具。"
+        )
+
+    raise SemanticMappingValidationError("Semantic Mapping 未生成有效决策。")
 
 
 def run_semantic_mapping(
@@ -447,22 +653,31 @@ def run_semantic_mapping(
         raise SemanticMappingValidationError("仓库快照与依赖图不匹配。")
 
     selected_model = model or get_chat_model()
+
     current_pool = pool
+
     decisions: list[SemanticMappingDecision] = []
+
     traces: list[SemanticToolTrace] = []
+
     query_count = 0
-    known_paths = _known_repository_paths(repository)
+
+    known_paths = _known_repository_paths(
+        repository,
+    )
+
     final_decision: SemanticMappingDecision | None = None
 
-    # 一次执行最多允许模型决策三轮。
+    # 最多允许三轮受控扩池。
     for _decision_attempt in range(
         1,
         MAX_EXPANSION_ROUNDS + 1,
     ):
-        decision = _invoke_mapping_model(
+        decision = _invoke_mapping_model_with_repair(
             requirement=requirement,
             pool=current_pool,
             traces=tuple(traces),
+            budget=budget,
             model=selected_model,
         )
 
@@ -472,8 +687,8 @@ def run_semantic_mapping(
             final_decision = decision
             break
 
-        # 扩池轮次基于 CandidatePool 已消耗的轮数继续累计，
-        # 防止重复调用 Agent 时重新从第一轮开始。
+        # 扩池轮次基于 CandidatePool 已消耗的轮数
+        # 继续累计，防止重复调用时重新从第一轮开始。
         expansion_round = current_pool.expansion_rounds_used + 1
 
         if expansion_round > MAX_EXPANSION_ROUNDS:
@@ -484,7 +699,8 @@ def run_semantic_mapping(
         for query in decision.queries:
             query_count += 1
 
-            # 已有查询记录和本次查询必须共同受 12 次上限约束。
+            # 已有查询记录和本次查询共同受到
+            # 12 次白名单工具查询上限约束。
             if len(pool.expansion_records) + query_count > MAX_EXPANSION_QUERIES:
                 raise SemanticMappingValidationError(
                     f"语义扩池查询超过 {MAX_EXPANSION_QUERIES} 次限制。"
@@ -493,15 +709,18 @@ def run_semantic_mapping(
             candidates = execute_semantic_query(
                 query,
                 symbol_index=symbol_index,
-                dependency_graph=dependency_graph,
+                dependency_graph=(dependency_graph),
             )
 
-            # reason 是解释性文本，不进入工具参数摘要。
+            # reason 是解释性文本，
+            # 不进入稳定的工具参数摘要。
             args_digest = canonical_digest(
                 "semantic_query",
                 query.model_dump(
                     mode="json",
-                    exclude={"reason"},
+                    exclude={
+                        "reason",
+                    },
                 ),
             )
 
@@ -523,16 +742,30 @@ def run_semantic_mapping(
                     round=expansion_round,
                     tool=query.tool,
                     args_digest=args_digest,
-                    accepted_paths=outcome.accepted_paths,
-                    rejected=outcome.rejected,
+                    accepted_paths=(outcome.accepted_paths),
+                    rejected=(outcome.rejected),
                 )
             )
 
     if final_decision is None:
-        raise SemanticMappingValidationError("Semantic Mapping 在 3 轮预算内未生成最终文件选择。")
+        # 三轮扩池用尽后，不由代码擅自选择文件。
+        # 给模型一次只允许最终选择的强制收敛轮。
+        # 该调用不能执行新工具，也不会扩大查询预算。
+        final_decision = _invoke_mapping_model_with_repair(
+            requirement=requirement,
+            pool=current_pool,
+            traces=tuple(traces),
+            budget=budget,
+            model=selected_model,
+            force_finalize=True,
+        )
+
+        decisions.append(
+            final_decision,
+        )
 
     normalized_selected = tuple(
-        normalize_digest_path(path) for path in final_decision.selected_paths
+        normalize_digest_path(path) for path in (final_decision.selected_paths)
     )
 
     if current_pool.entries and not normalized_selected:
@@ -540,7 +773,12 @@ def run_semantic_mapping(
             "CandidatePool 非空时，Semantic Mapping 必须选择至少一个文件。"
         )
 
-    pool_paths = {normalize_digest_path(entry.path) for entry in current_pool.entries}
+    pool_paths = {
+        normalize_digest_path(
+            entry.path,
+        )
+        for entry in current_pool.entries
+    }
 
     unknown_paths = sorted(set(normalized_selected) - pool_paths)
 
@@ -555,9 +793,10 @@ def run_semantic_mapping(
             repository,
             budget=budget,
             set_id=set_id,
-            selected_paths=normalized_selected,
+            selected_paths=(normalized_selected),
             selected_by="semantic_map",
         )
+
     except ValueError as exc:
         raise SemanticMappingValidationError(str(exc)) from exc
 

@@ -15,7 +15,10 @@ from app.cli.evaluate import (
 )
 
 
-def _git(repository: Path, *arguments: str) -> str:
+def _git(
+    repository: Path,
+    *arguments: str,
+) -> str:
     """在临时仓库中执行 Git 命令。"""
 
     completed = subprocess.run(
@@ -30,6 +33,7 @@ def _git(repository: Path, *arguments: str) -> str:
         text=True,
         encoding="utf-8",
     )
+
     return completed.stdout.strip()
 
 
@@ -42,17 +46,30 @@ def _commit_files(
 
     for relative_path, content in files.items():
         target = repository / relative_path
+
         target.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
+
         target.write_text(
             content,
             encoding="utf-8",
         )
 
-    _git(repository, "add", ".")
-    _git(repository, "commit", "-m", message)
+    _git(
+        repository,
+        "add",
+        ".",
+    )
+
+    _git(
+        repository,
+        "commit",
+        "-m",
+        message,
+    )
+
     return _git(
         repository,
         "rev-parse",
@@ -60,19 +77,27 @@ def _commit_files(
     )
 
 
-def _repository(tmp_path: Path) -> Path:
+def _repository(
+    tmp_path: Path,
+) -> Path:
     """创建一条可被评测器选中的历史样本。"""
 
     repository = tmp_path / "order_service"
+
     repository.mkdir()
 
-    _git(repository, "init")
+    _git(
+        repository,
+        "init",
+    )
+
     _git(
         repository,
         "config",
         "user.email",
         "tests@example.com",
     )
+
     _git(
         repository,
         "config",
@@ -95,14 +120,15 @@ def _repository(tmp_path: Path) -> Path:
                 "from order_app.service "
                 "import OrderService\n\n"
                 "def test_cancel_order() -> None:\n"
-                "    OrderService().cancel_order('1')\n"
+                "    OrderService()"
+                ".cancel_order('1')\n"
             ),
         },
     )
 
     _commit_files(
         repository,
-        "improve order cancellation behavior and coverage",
+        ("improve order cancellation behavior and coverage"),
         {
             "order_app/service.py": (
                 "class OrderService:\n"
@@ -116,7 +142,8 @@ def _repository(tmp_path: Path) -> Path:
                 "import OrderService\n\n"
                 "def test_cancel_order() -> None:\n"
                 "    assert "
-                "OrderService().cancel_order('1') "
+                "OrderService()"
+                ".cancel_order('1') "
                 "is True\n"
             ),
         },
@@ -157,12 +184,31 @@ def _model_response() -> str:
     """
 
 
+def _semantic_decision() -> str:
+    """生成只选择快照真实服务文件的语义映射结果。"""
+
+    return json.dumps(
+        {
+            "needs_more_context": False,
+            "selected_paths": [
+                "order_app/service.py",
+            ],
+            "queries": [],
+            "explanation": ("根据 cancel_order 符号选择订单服务文件。"),
+        },
+        ensure_ascii=False,
+    )
+
+
 def test_cli_runs_real_adapter_and_writes_versioned_json(
     tmp_path: Path,
 ) -> None:
-    """CLI 应完成真实链路并保存可审计 JSON。"""
+    """CLI 应完成确定性真实链路并保存可审计 JSON。"""
 
-    repository = _repository(tmp_path)
+    repository = _repository(
+        tmp_path,
+    )
+
     output = tmp_path / "results" / "report.json"
 
     result, written_path = run_evaluation_cli(
@@ -175,7 +221,11 @@ def test_cli_runs_real_adapter_and_writes_versioned_json(
             "--experiment-name",
             "integration-test",
         ),
-        model=FakeListChatModel(responses=[_model_response()]),
+        model=FakeListChatModel(
+            responses=[
+                _model_response(),
+            ]
+        ),
     )
 
     assert written_path == output.resolve()
@@ -185,15 +235,23 @@ def test_cli_runs_real_adapter_and_writes_versioned_json(
     assert result.metrics.file_recall_at_k == 1.0
     assert result.metrics.hallucination_rate == 0.0
 
-    payload = json.loads(output.read_text(encoding="utf-8"))
+    payload = json.loads(
+        output.read_text(
+            encoding="utf-8",
+        )
+    )
 
     assert payload["schema_version"] == "1.0"
+
     assert payload["experiment_name"] == "integration-test"
+
     assert (
         payload["dataset"]["samples"][0]["analysis_commit"]
         != payload["dataset"]["samples"][0]["answer_commit"]
     )
+
     assert payload["cochange_leak_reports"][0]["passed"] is True
+
     assert payload["metrics"]["file_recall_at_k"] == 1.0
 
 
@@ -202,7 +260,10 @@ def test_cli_rejects_non_json_output_before_running_model(
 ) -> None:
     """报告扩展名错误时不得调用模型或创建文件。"""
 
-    repository = _repository(tmp_path)
+    repository = _repository(
+        tmp_path,
+    )
+
     output = tmp_path / "report.txt"
 
     with pytest.raises(
@@ -215,10 +276,61 @@ def test_cli_rejects_non_json_output_before_running_model(
                 "--output",
                 str(output),
             ),
-            model=FakeListChatModel(responses=[]),
+            model=FakeListChatModel(
+                responses=[],
+            ),
         )
 
     assert not output.exists()
+
+
+def test_cli_runs_semantic_mode_with_independent_default_name(
+    tmp_path: Path,
+) -> None:
+    """语义模式必须独立命名，避免报告覆盖或冒充确定性基线。"""
+
+    repository = _repository(
+        tmp_path,
+    )
+
+    output = tmp_path / "results" / "semantic.json"
+
+    result, written_path = run_evaluation_cli(
+        (
+            str(repository),
+            "--samples",
+            "1",
+            "--context-mode",
+            "semantic",
+            "--output",
+            str(output),
+        ),
+        model=FakeListChatModel(
+            responses=[
+                _model_response(),
+                _semantic_decision(),
+            ]
+        ),
+    )
+
+    assert written_path == output.resolve()
+
+    assert result.experiment_name == ("semantic-retrieval-deterministic-impact")
+
+    assert result.metrics.sample_count == 1
+    assert result.metrics.failure_rate == 0.0
+
+    payload = json.loads(
+        output.read_text(
+            encoding="utf-8",
+        )
+    )
+
+    assert payload["experiment_name"] == ("semantic-retrieval-deterministic-impact")
+
+    assert payload["observations"][0]["selected_paths"] == [
+        "order_app/service.py",
+    ]
 
 
 def test_main_returns_failure_code_for_invalid_arguments(
@@ -227,7 +339,9 @@ def test_main_returns_failure_code_for_invalid_arguments(
 ) -> None:
     """普通配置错误必须返回退出码 1，方便 CI 阻断。"""
 
-    repository = _repository(tmp_path)
+    repository = _repository(
+        tmp_path,
+    )
 
     exit_code = main(
         (
@@ -249,15 +363,21 @@ def test_cli_rejects_history_without_eligible_sample(
     """没有合格样本时不能生成空报告冒充成功。"""
 
     repository = tmp_path / "empty_history"
+
     repository.mkdir()
 
-    _git(repository, "init")
+    _git(
+        repository,
+        "init",
+    )
+
     _git(
         repository,
         "config",
         "user.email",
         "tests@example.com",
     )
+
     _git(
         repository,
         "config",
@@ -279,5 +399,7 @@ def test_cli_rejects_history_without_eligible_sample(
     ):
         run_evaluation_cli(
             (str(repository),),
-            model=FakeListChatModel(responses=[]),
+            model=FakeListChatModel(
+                responses=[],
+            ),
         )

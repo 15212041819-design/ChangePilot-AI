@@ -4,8 +4,21 @@
 
     python -m app.cli.evaluate C:\\code\\order_service --samples 15
 
+确定性检索基线：
+
+    python -m app.cli.evaluate C:\\code\\order_service \
+        --context-mode deterministic \
+        --samples 15
+
+语义映射实验：
+
+    python -m app.cli.evaluate C:\\code\\order_service \
+        --context-mode semantic \
+        --samples 15
+
 命令会从指定 ref 向前筛选历史提交，在每条样本的 ``commit^`` 快照上
-运行“新检索 + 确定性 Impact 引擎”，并把原始记录与聚合指标写入 JSON。
+运行可选择的上下文检索与确定性 Impact 引擎，并把原始记录与聚合指标
+写入 JSON。
 """
 
 from __future__ import annotations
@@ -18,9 +31,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import (
+    BaseChatModel,
+)
 
-from app.tools.evaluation_dataset import build_evaluation_dataset
+from app.tools.evaluation_dataset import (
+    build_evaluation_dataset,
+)
 from app.tools.evaluation_runner import (
     EvaluationExperimentResult,
     EvaluationRunInvalidError,
@@ -32,7 +49,19 @@ from app.tools.evidence_evaluation_adapter import (
 )
 
 DEFAULT_EXPERIMENT_NAME = "new-retrieval-deterministic-impact"
+
 DEFAULT_OUTPUT_PATH = Path("evals/results/new-retrieval-deterministic-impact.json")
+
+
+def _default_experiment_name(
+    context_mode: str,
+) -> str:
+    """根据检索模式生成不会混淆基线和语义实验的默认名称。"""
+
+    if context_mode == "semantic":
+        return "semantic-retrieval-deterministic-impact"
+
+    return DEFAULT_EXPERIMENT_NAME
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -42,60 +71,87 @@ def build_argument_parser() -> argparse.ArgumentParser:
         prog="changepilot-evaluate",
         description=("从 Git 历史构建无泄漏样本，并运行 ChangePilot AI 证据驱动评测。"),
     )
+
     parser.add_argument(
         "repository",
         help="待评测 Git 仓库或 monorepo 子目录。",
     )
+
     parser.add_argument(
         "--ref",
         default="HEAD",
-        help="从哪个 Git ref 开始向前筛选提交，默认 HEAD。",
+        help=("从哪个 Git ref 开始向前筛选提交，默认 HEAD。"),
     )
+
     parser.add_argument(
         "--samples",
         type=int,
         default=15,
         help="最多接纳多少条样本，默认 15。",
     )
+
     parser.add_argument(
         "--scan-limit",
         type=int,
         default=200,
-        help="最多检查多少条历史提交，默认 200。",
+        help=("最多检查多少条历史提交，默认 200。"),
     )
+
     parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
         help=("JSON 报告路径，默认 evals/results/new-retrieval-deterministic-impact.json。"),
     )
+
     parser.add_argument(
         "--experiment-name",
-        default=DEFAULT_EXPERIMENT_NAME,
-        help="写入报告的实验名称。",
+        default=None,
+        help=("写入报告的实验名称；省略时根据 context mode 自动生成。"),
     )
+
+    parser.add_argument(
+        "--context-mode",
+        choices=(
+            "deterministic",
+            "semantic",
+        ),
+        default="deterministic",
+        help=(
+            "上下文构建模式："
+            "deterministic 为确定性基线，"
+            "semantic 为受控语义映射，"
+            "默认 deterministic。"
+        ),
+    )
+
     parser.add_argument(
         "--pool-limit",
         type=int,
         default=50,
-        help="CandidatePool 文件上限，范围 1 到 60，默认 50。",
+        help=("CandidatePool 文件上限，范围 1 到 60，默认 50。"),
     )
+
     parser.add_argument(
         "--max-repository-files",
         type=int,
         default=200,
-        help="单个快照最多扫描的仓库文件数，默认 200。",
+        help=("单个快照最多扫描的仓库文件数，默认 200。"),
     )
+
     parser.add_argument(
         "--max-file-size-bytes",
         type=int,
         default=50_000,
-        help="单个文件最大读取字节数，默认 50000。",
+        help=("单个文件最大读取字节数，默认 50000。"),
     )
+
     return parser
 
 
-def _validate_cli_values(args: argparse.Namespace) -> None:
+def _validate_cli_values(
+    args: argparse.Namespace,
+) -> None:
     """在调用 Git 或 LLM 前拒绝非法命令行配置。"""
 
     if args.samples <= 0:
@@ -104,7 +160,7 @@ def _validate_cli_values(args: argparse.Namespace) -> None:
     if args.scan_limit <= 0:
         raise ValueError("--scan-limit 必须大于 0。")
 
-    if not args.experiment_name.strip():
+    if args.experiment_name is not None and not args.experiment_name.strip():
         raise ValueError("--experiment-name 不能为空。")
 
     if args.output.suffix.casefold() != ".json":
@@ -121,7 +177,7 @@ def result_to_json_payload(
         "experiment_name": result.experiment_name,
         "dataset": asdict(result.dataset),
         "observations": [asdict(observation) for observation in result.observations],
-        "cochange_leak_reports": [asdict(report) for report in result.cochange_leak_reports],
+        "cochange_leak_reports": [asdict(report) for report in (result.cochange_leak_reports)],
         "metrics": asdict(result.metrics),
     }
 
@@ -145,7 +201,10 @@ def write_evaluation_result(
         exist_ok=True,
     )
 
-    payload = result_to_json_payload(result)
+    payload = result_to_json_payload(
+        result,
+    )
+
     rendered = json.dumps(
         payload,
         ensure_ascii=False,
@@ -158,6 +217,7 @@ def write_evaluation_result(
         encoding="utf-8",
         newline="\n",
     )
+
     return resolved_output
 
 
@@ -165,11 +225,15 @@ def run_evaluation_cli(
     argv: Sequence[str] | None = None,
     *,
     model: BaseChatModel | None = None,
-) -> tuple[EvaluationExperimentResult, Path]:
+) -> tuple[
+    EvaluationExperimentResult,
+    Path,
+]:
     """解析参数、执行真实实验并保存报告；测试可注入假模型。"""
 
     parser = build_argument_parser()
     args = parser.parse_args(argv)
+
     _validate_cli_values(args)
 
     repository_path = Path(args.repository).expanduser().resolve()
@@ -189,23 +253,29 @@ def run_evaluation_cli(
     adapter = create_evidence_impact_adapter(
         model=model,
         config=EvidenceImpactAdapterConfig(
-            max_repository_files=args.max_repository_files,
-            max_file_size_bytes=args.max_file_size_bytes,
+            max_repository_files=(args.max_repository_files),
+            max_file_size_bytes=(args.max_file_size_bytes),
             pool_limit=args.pool_limit,
+            context_mode=args.context_mode,
         ),
+    )
+
+    experiment_name = args.experiment_name or _default_experiment_name(
+        args.context_mode,
     )
 
     result = run_evaluation_experiment(
         repository_path,
         dataset,
         adapter,
-        experiment_name=args.experiment_name,
+        experiment_name=experiment_name,
     )
 
     output_path = write_evaluation_result(
         result,
         args.output,
     )
+
     return result, output_path
 
 
@@ -227,25 +297,35 @@ def _print_summary(
     print(f"output: {output_path}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:
     """命令行进程入口，返回可用于 CI 的退出码。"""
 
     try:
         result, output_path = run_evaluation_cli(argv)
+
     except EvaluationRunInvalidError as exc:
         print(
             f"evaluation invalid: {exc}",
             file=sys.stderr,
         )
         return 2
-    except Exception as exc:  # noqa: BLE001 - CLI 必须转换成稳定退出码。
+
+    except Exception as exc:  # noqa: BLE001
+        # CLI 必须把普通运行错误转换成稳定退出码，
+        # 否则 CI 只能得到不一致的 Python traceback。
         print(
             f"evaluation failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return 1
 
-    _print_summary(result, output_path)
+    _print_summary(
+        result,
+        output_path,
+    )
+
     return 0
 
 
