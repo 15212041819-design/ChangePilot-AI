@@ -30,6 +30,8 @@ from app.schemas.dependency_graph import (
 from app.schemas.repository import (
     RepositorySnapshot,
 )
+from app.schemas.retrieval_trace import CandidateRetrievalTrace
+from app.tools.candidate_reranker import rerank_candidate_pool
 from app.tools.contract_digest import (
     canonical_digest,
     compute_pool_digest,
@@ -103,6 +105,21 @@ class ContextBuildResult:
     candidate_pool: CandidatePool
 
     candidate_set: CandidateSet
+
+    # 按路径稳定排序的全量文件检索轨迹。
+    # 它只用于诊断，不参与 CandidatePool 或 CandidateSet 的 digest。
+    retrieval_traces: tuple[
+        CandidateRetrievalTrace,
+        ...,
+    ]
+
+
+@dataclass(frozen=True)
+class CandidatePoolRetrievalResult:
+    """候选池与其全量文件评分轨迹。"""
+
+    candidate_pool: CandidatePool
+    traces: tuple[CandidateRetrievalTrace, ...]
 
 
 def classify_file_kind(
@@ -577,7 +594,7 @@ def _apply_cochange_signals(
             cochange_score = round(
                 min(
                     MAX_COCHANGE_SIGNAL,
-                    pair.score * MAX_COCHANGE_SIGNAL,
+                    (pair.score * MAX_COCHANGE_SIGNAL),
                 ),
                 3,
             )
@@ -594,7 +611,7 @@ def _apply_cochange_signals(
             )
 
 
-def retrieve_candidate_pool(
+def retrieve_candidate_pool_with_traces(
     requirement: RequirementSpec,
     repository: RepositorySnapshot,
     symbol_index: RepositorySymbolIndex,
@@ -605,8 +622,8 @@ def retrieve_candidate_pool(
     cochange_index: CoChangeIndex | None = None,
     pool_id: str = "PL-0001",
     pool_limit: int = DEFAULT_POOL_LIMIT,
-) -> CandidatePool:
-    """用确定性信号生成最多 60 个真实文件的候选池。"""
+) -> CandidatePoolRetrievalResult:
+    """生成候选池，并记录快照中每个文件的检索判定轨迹。"""
 
     normalized_commit = commit.strip()
 
@@ -657,10 +674,7 @@ def retrieve_candidate_pool(
 
     ranked: list[PoolEntry] = []
 
-    for (
-        path,
-        path_signals,
-    ) in signals.items():
+    for path, path_signals in signals.items():
         if path not in repository_files or not path_signals:
             continue
 
@@ -707,11 +721,113 @@ def retrieve_candidate_pool(
         pool_digest=EMPTY_SHA256,
     )
 
-    return candidate.model_copy(
+    finalized_candidate = candidate.model_copy(
         update={
-            "pool_digest": (compute_pool_digest(candidate)),
+            "pool_digest": compute_pool_digest(candidate),
         }
     )
+
+    ranked_by_path = {
+        entry.path: (
+            rank,
+            entry,
+        )
+        for rank, entry in enumerate(
+            ranked,
+            start=1,
+        )
+    }
+
+    traces: list[CandidateRetrievalTrace] = []
+
+    for repository_file in sorted(
+        repository.files,
+        key=lambda item: normalize_digest_path(item.relative_path),
+    ):
+        path = normalize_digest_path(repository_file.relative_path)
+        kind = classify_file_kind(path)
+
+        if not _path_allowed(
+            path,
+            requirement,
+        ):
+            traces.append(
+                CandidateRetrievalTrace(
+                    path=path,
+                    kind=kind,
+                    outcome="scope_excluded",
+                )
+            )
+            continue
+
+        if kind == "doc":
+            traces.append(
+                CandidateRetrievalTrace(
+                    path=path,
+                    kind=kind,
+                    outcome="document",
+                )
+            )
+            continue
+
+        ranked_item = ranked_by_path.get(path)
+
+        if ranked_item is None:
+            traces.append(
+                CandidateRetrievalTrace(
+                    path=path,
+                    kind=kind,
+                    outcome="no_signal",
+                )
+            )
+            continue
+
+        full_rank, entry = ranked_item
+
+        traces.append(
+            CandidateRetrievalTrace(
+                path=path,
+                kind=kind,
+                outcome=("selected" if full_rank <= pool_limit else "below_cutoff"),
+                full_rank=full_rank,
+                total_score=entry.pre_score,
+                signals=entry.signals,
+            )
+        )
+
+    return CandidatePoolRetrievalResult(
+        candidate_pool=finalized_candidate,
+        traces=tuple(traces),
+    )
+
+
+def retrieve_candidate_pool(
+    requirement: RequirementSpec,
+    repository: RepositorySnapshot,
+    symbol_index: RepositorySymbolIndex,
+    dependency_graph: RepositoryDependencyGraph,
+    *,
+    commit: str,
+    index_digest: str,
+    cochange_index: CoChangeIndex | None = None,
+    pool_id: str = "PL-0001",
+    pool_limit: int = DEFAULT_POOL_LIMIT,
+) -> CandidatePool:
+    """兼容旧调用方：只返回候选池，不暴露诊断轨迹。"""
+
+    result = retrieve_candidate_pool_with_traces(
+        requirement,
+        repository,
+        symbol_index,
+        dependency_graph,
+        commit=commit,
+        index_digest=index_digest,
+        cochange_index=cochange_index,
+        pool_id=pool_id,
+        pool_limit=pool_limit,
+    )
+
+    return result.candidate_pool
 
 
 def _selection_reason(
@@ -738,11 +854,7 @@ def freeze_candidate_set(
     *,
     budget: Budget,
     set_id: str = "CS-0001",
-    selected_paths: tuple[
-        str,
-        ...,
-    ]
-    | None = None,
+    selected_paths: tuple[str, ...] | None = None,
     selected_by: str = "baseline",
 ) -> CandidateSet:
     """根据真实快照内容冻结不可变 CandidateSet。"""
@@ -754,15 +866,15 @@ def freeze_candidate_set(
     }
 
     if selected_paths is None:
-        ordered_entries = sorted(
-            pool.entries,
-            key=lambda item: (
-                -item.pre_score,
-                item.path,
-            ),
+        # 第二阶段不改变 CandidatePool 的宽召回结果，
+        # 只在冻结前根据文件类型分配有限上下文预算。
+        # 这样可以防止测试文件凭借 testmap 信号占满前 12 名，
+        # 同时仍为测试策略分支保留少量真实测试文件。
+        reranked = rerank_candidate_pool(
+            pool,
+            budget=budget,
         )
-
-        paths = tuple(entry.path for entry in ordered_entries[: budget.max_files])
+        paths = reranked.selected_paths
 
     else:
         normalized_paths = tuple(normalize_digest_path(path) for path in selected_paths)
@@ -800,7 +912,7 @@ def freeze_candidate_set(
         confidence = round(
             min(
                 1.0,
-                entry.pre_score / (entry.pre_score + 2.0),
+                (entry.pre_score / (entry.pre_score + 2.0)),
             ),
             3,
         )
@@ -812,7 +924,7 @@ def freeze_candidate_set(
                 kind=entry.kind,
                 symbols=tuple(entry.symbols[: budget.max_symbols_per_file]),
                 line=first_line,
-                reason=(_selection_reason(entry)),
+                reason=_selection_reason(entry),
                 score=entry.pre_score,
                 confidence=confidence,
                 signals=entry.signals,
@@ -834,7 +946,7 @@ def freeze_candidate_set(
 
     return candidate.model_copy(
         update={
-            "set_digest": (compute_set_digest(candidate)),
+            "set_digest": compute_set_digest(candidate),
         }
     )
 
@@ -866,7 +978,7 @@ def build_repository_context(
         dependency_graph,
     )
 
-    pool = retrieve_candidate_pool(
+    retrieval = retrieve_candidate_pool_with_traces(
         requirement,
         repository,
         symbol_index,
@@ -877,6 +989,8 @@ def build_repository_context(
         pool_id=pool_id,
         pool_limit=pool_limit,
     )
+
+    pool = retrieval.candidate_pool
 
     budget = Budget(
         max_files=(requirement.scope_hints.max_files),
@@ -893,9 +1007,10 @@ def build_repository_context(
 
     return ContextBuildResult(
         symbol_index=symbol_index,
-        dependency_graph=(dependency_graph),
-        repository_vocabulary=(vocabulary),
+        dependency_graph=dependency_graph,
+        repository_vocabulary=vocabulary,
         index_digest=index_digest,
         candidate_pool=pool,
         candidate_set=frozen_set,
+        retrieval_traces=retrieval.traces,
     )
