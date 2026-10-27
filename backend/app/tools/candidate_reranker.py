@@ -14,31 +14,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.schemas.contracts import Budget, CandidatePool, PoolEntry
+from app.schemas.contracts import (
+    Budget,
+    CandidatePool,
+    PoolEntry,
+)
 
 # 测试文件对测试策略有价值，但不能占满供三个分析分支共享的上下文。
 # 每 5 个文件预算预留 1 个测试位，v1 最多预留 2 个。
 TEST_SLOT_DIVISOR = 5
 MAX_RESERVED_TEST_FILES = 2
 
-# 第一阶段的 symbol 信号会随同义词、限定名和签名中的重复命中不断累加。
-# 第二阶段只需要确认“存在强符号证据”，因此把 symbol 最高限制为 3 分，
-# 防止一个文件仅凭重复符号命中挤掉同时拥有多类证据的文件。
+# 第一阶段 symbol 信号会随同义词、限定名和签名中的重复命中不断累加。
+# 第二阶段只需要确认“存在强符号证据”，不能让重复命中无限放大。
 RERANK_SIGNAL_CAPS = {
     "symbol": 3.0,
 }
 
-# co-change 表示目标文件与需求直接命中文件在历史提交中经常共同变化。
-# 开发样本和留出样本都表明它能补足纯关键词/符号排序的遗漏，因此将其提升为
-# 2 倍权重。其他信号保持第一阶段权重，避免进行没有证据支持的全面调参。
+# dependency closure 是当前快照中的直接结构事实，应高于重复词面命中；
+# co-change 是时间切分后的历史结构证据，用来补足纯关键词/符号排序的遗漏。
+# 两项权重均在开发样本与留出样本上同向改善后冻结。
 RERANK_SIGNAL_WEIGHTS = {
     "cochange": 2.0,
+    "dep_closure": 4.0,
 }
 
 
 @dataclass(frozen=True)
 class CandidateRerankItem:
-    """一个候选文件在第二阶段选择中的可解释轨迹。"""
+    """一个候选在第二阶段选择中的可解释轨迹。"""
 
     path: str
     original_rank: int
@@ -67,7 +71,10 @@ def _stable_pool_order(
         sorted(
             entries,
             key=lambda entry: (
-                -round(entry.pre_score, 3),
+                -round(
+                    entry.pre_score,
+                    3,
+                ),
                 entry.path,
             ),
         )
@@ -88,13 +95,15 @@ def _reserved_test_slots(
     )
 
 
-def _rerank_evidence_score(entry: PoolEntry) -> float:
+def _rerank_evidence_score(
+    entry: PoolEntry,
+) -> float:
     """应用冻结的封顶与权重规则，返回稳定的二阶段证据分数。
 
     处理过程：
 
     1. 对 symbol 等配置过上限的信号执行封顶；
-    2. 对 co-change 等配置过权重的信号进行加权；
+    2. 对依赖闭包和历史共变等信号进行加权；
     3. 对分值排序后求和，避免浮点累加顺序受输入顺序影响；
     4. 统一保留三位小数，保证跨平台排序稳定。
     """
@@ -102,13 +111,22 @@ def _rerank_evidence_score(entry: PoolEntry) -> float:
     values = sorted(
         min(
             signal.value,
-            RERANK_SIGNAL_CAPS.get(signal.name, signal.value),
+            RERANK_SIGNAL_CAPS.get(
+                signal.name,
+                signal.value,
+            ),
         )
-        * RERANK_SIGNAL_WEIGHTS.get(signal.name, 1.0)
+        * RERANK_SIGNAL_WEIGHTS.get(
+            signal.name,
+            1.0,
+        )
         for signal in entry.signals
     )
 
-    return round(sum(values), 3)
+    return round(
+        sum(values),
+        3,
+    )
 
 
 def _stable_source_order(
@@ -121,7 +139,10 @@ def _stable_source_order(
             entries,
             key=lambda entry: (
                 -_rerank_evidence_score(entry),
-                -round(entry.pre_score, 3),
+                -round(
+                    entry.pre_score,
+                    3,
+                ),
                 entry.path,
             ),
         )
@@ -145,7 +166,11 @@ def rerank_candidate_pool(
     """
 
     ordered = _stable_pool_order(pool.entries)
-    limit = min(budget.max_files, len(ordered))
+
+    limit = min(
+        budget.max_files,
+        len(ordered),
+    )
 
     if limit == 0:
         return CandidateRerankResult(
@@ -158,7 +183,8 @@ def rerank_candidate_pool(
     # 源码使用二阶段证据规则排序。
     source_like = _stable_source_order(tuple(entry for entry in ordered if entry.kind != "test"))
 
-    # 测试文件继续沿用第一阶段顺序，避免测试映射结果被再次扰动。
+    # 测试文件继续沿用第一阶段顺序，
+    # 避免测试映射结果被再次扰动。
     tests = tuple(entry for entry in ordered if entry.kind == "test")
 
     reserved_test_slots = _reserved_test_slots(
@@ -175,6 +201,7 @@ def rerank_candidate_pool(
         *source_like[:source_slots],
         *tests[:reserved_test_slots],
     ]
+
     selected_paths = {entry.path for entry in selected}
 
     # 某一类数量不足时，按原始全局证据排名填满剩余位置。
@@ -207,11 +234,11 @@ def rerank_candidate_pool(
     traces = tuple(
         CandidateRerankItem(
             path=entry.path,
-            original_rank=original_rank[entry.path],
-            rerank_rank=rerank_rank.get(entry.path),
+            original_rank=(original_rank[entry.path]),
+            rerank_rank=(rerank_rank.get(entry.path)),
             pre_score=entry.pre_score,
             lane=("test" if entry.kind == "test" else "source"),
-            selected=entry.path in selected_paths,
+            selected=(entry.path in selected_paths),
         )
         for entry in ordered
     )

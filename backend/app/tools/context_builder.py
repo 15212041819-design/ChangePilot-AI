@@ -24,12 +24,8 @@ from app.schemas.contracts import (
     RequirementSpec,
     SignalScore,
 )
-from app.schemas.dependency_graph import (
-    RepositoryDependencyGraph,
-)
-from app.schemas.repository import (
-    RepositorySnapshot,
-)
+from app.schemas.dependency_graph import RepositoryDependencyGraph
+from app.schemas.repository import RepositorySnapshot
 from app.schemas.retrieval_trace import CandidateRetrievalTrace
 from app.tools.candidate_reranker import rerank_candidate_pool
 from app.tools.contract_digest import (
@@ -44,17 +40,18 @@ from app.tools.git_cochange import (
     CoChangeIndex,
     find_cochange_neighbors,
 )
-from app.tools.python_dependency_graph import (
-    build_python_dependency_graph,
-)
-from app.tools.python_symbol_indexer import (
-    index_python_symbols,
-)
+from app.tools.python_dependency_graph import build_python_dependency_graph
+from app.tools.python_symbol_indexer import index_python_symbols
 
 EMPTY_SHA256 = "sha256:" + "0" * 64
 DEFAULT_POOL_LIMIT = 50
 MAX_POOL_LIMIT = 60
 DEPENDENCY_DEPTH = 2
+
+# 仅有一次正文关键词命中的文件通常只有 0.2 分。
+# 这类文件仍可作为普通候选，但不能充当依赖闭包和共变扩展的根节点，
+# 否则常见词会把大半个仓库都变成种子，并阻断真实结构证据的补分。
+MIN_DIRECT_SEED_KEYWORD_SCORE = 1.5
 
 # 至少共同修改两次才作为候选证据，
 # 避免单次偶然提交产生大量噪声。
@@ -95,23 +92,15 @@ class ContextBuildResult:
     """一次确定性上下文构建的完整结果。"""
 
     symbol_index: RepositorySymbolIndex
-
     dependency_graph: RepositoryDependencyGraph
-
     repository_vocabulary: frozenset[str]
-
     index_digest: str
-
     candidate_pool: CandidatePool
-
     candidate_set: CandidateSet
 
     # 按路径稳定排序的全量文件检索轨迹。
     # 它只用于诊断，不参与 CandidatePool 或 CandidateSet 的 digest。
-    retrieval_traces: tuple[
-        CandidateRetrievalTrace,
-        ...,
-    ]
+    retrieval_traces: tuple[CandidateRetrievalTrace, ...]
 
 
 @dataclass(frozen=True)
@@ -122,16 +111,13 @@ class CandidatePoolRetrievalResult:
     traces: tuple[CandidateRetrievalTrace, ...]
 
 
-def classify_file_kind(
-    path: str,
-) -> FileKind:
+def classify_file_kind(path: str) -> FileKind:
     """根据规范化仓库路径判断契约文件类型。"""
 
     normalized = normalize_digest_path(path)
     pure_path = PurePosixPath(normalized)
 
     lowered_parts = tuple(part.casefold() for part in pure_path.parts)
-
     file_name = pure_path.name.casefold()
     suffix = pure_path.suffix.casefold()
 
@@ -164,7 +150,11 @@ def build_repository_vocabulary(
     vocabulary: set[str] = set()
 
     for repository_file in repository.files:
-        path = PurePosixPath(normalize_digest_path(repository_file.relative_path))
+        path = PurePosixPath(
+            normalize_digest_path(
+                repository_file.relative_path,
+            )
+        )
 
         vocabulary.add(path.as_posix())
         vocabulary.add(path.stem)
@@ -219,11 +209,11 @@ def compute_repository_index_digest(
             "parse_error": item.parse_error,
             "symbols": [
                 {
-                    "qualified_name": (symbol.qualified_name),
+                    "qualified_name": symbol.qualified_name,
                     "kind": symbol.kind,
-                    "line_start": (symbol.line_start),
-                    "line_end": (symbol.line_end),
-                    "signature": (symbol.signature),
+                    "line_start": symbol.line_start,
+                    "line_end": symbol.line_end,
+                    "signature": symbol.signature,
                 }
                 for symbol in sorted(
                     item.symbols,
@@ -235,7 +225,7 @@ def compute_repository_index_digest(
             ],
             "imports": [
                 {
-                    "module": (reference.module),
+                    "module": reference.module,
                     "imported_name": (reference.imported_name),
                     "relative_level": (reference.relative_level),
                     "line_number": (reference.line_number),
@@ -244,7 +234,7 @@ def compute_repository_index_digest(
                     item.imports,
                     key=lambda candidate: (
                         candidate.module,
-                        (candidate.imported_name or ""),
+                        candidate.imported_name or "",
                         candidate.relative_level,
                         candidate.line_number,
                     ),
@@ -259,22 +249,22 @@ def compute_repository_index_digest(
 
     dependencies = [
         {
-            "source_module": (item.source_module),
+            "source_module": item.source_module,
             "source_file": normalize_digest_path(item.source_file),
-            "target_module": (item.target_module),
+            "target_module": item.target_module,
             "target_file": (
                 normalize_digest_path(item.target_file) if item.target_file is not None else None
             ),
-            "imported_name": (item.imported_name),
+            "imported_name": item.imported_name,
             "kind": item.kind,
-            "line_number": (item.line_number),
+            "line_number": item.line_number,
         }
         for item in sorted(
             dependency_graph.dependencies,
             key=lambda candidate: (
                 candidate.source_module,
                 candidate.target_module,
-                (candidate.imported_name or ""),
+                candidate.imported_name or "",
                 candidate.line_number,
             ),
         )
@@ -339,7 +329,6 @@ def _path_allowed(
     """应用 ScopeHints 的包含和排除边界。"""
 
     normalized = normalize_digest_path(path)
-
     parts = set(PurePosixPath(normalized).parts)
 
     excluded = {
@@ -370,10 +359,7 @@ def _path_allowed(
 
 def _symbol_lookup(
     symbol_index: RepositorySymbolIndex,
-) -> dict[
-    str,
-    tuple[str, ...],
-]:
+) -> dict[str, tuple[str, ...]]:
     """构建文件到最多 10 个限定符号名的稳定映射。"""
 
     return {
@@ -395,10 +381,7 @@ def _base_signals(
     repository: RepositorySnapshot,
     symbol_index: RepositorySymbolIndex,
     requirement: RequirementSpec,
-) -> dict[
-    str,
-    dict[str, float],
-]:
+) -> dict[str, dict[str, float]]:
     """计算文件的关键词与符号基础信号。"""
 
     terms = _search_terms(requirement)
@@ -466,21 +449,48 @@ def _base_signals(
     return signals
 
 
+def _is_direct_seed(
+    path_signals: dict[str, float],
+) -> bool:
+    """判断候选是否具备足以向外扩展的直接需求证据。
+
+    弱关键词文件仍保留在候选列表中，但只有以下文件
+    能够继续向外扩展依赖和历史共变关系：
+
+    1. 存在真实符号命中；
+    2. 关键词得分达到冻结阈值 1.5。
+    """
+
+    return (
+        "symbol" in path_signals
+        or path_signals.get(
+            "keyword",
+            0.0,
+        )
+        >= MIN_DIRECT_SEED_KEYWORD_SCORE
+    )
+
+
+def _direct_seed_paths(
+    signals: dict[str, dict[str, float]],
+) -> set[str]:
+    """返回稳定规则下的强直接种子路径集合。"""
+
+    return {path for path, path_signals in signals.items() if _is_direct_seed(path_signals)}
+
+
 def _apply_dependency_signals(
-    signals: dict[
-        str,
-        dict[str, float],
-    ],
+    signals: dict[str, dict[str, float]],
     dependency_graph: RepositoryDependencyGraph,
     repository_paths: set[str],
 ) -> None:
-    """从基础命中文件向上下游扩展两层依赖候选。"""
+    """从强直接种子向上下游扩展两层依赖候选。
 
-    seed_paths = {
-        path
-        for path, path_signals in signals.items()
-        if ("keyword" in path_signals or "symbol" in path_signals)
-    }
+    弱关键词文件不会作为 BFS 根节点，但如果它与强种子
+    存在真实 import 关系，仍然能够获得 dep_closure 证据。
+    """
+
+    seed_paths = _direct_seed_paths(signals)
 
     adjacency: dict[
         str,
@@ -492,20 +502,17 @@ def _apply_dependency_signals(
             continue
 
         source = normalize_digest_path(dependency.source_file)
-
         target = normalize_digest_path(dependency.target_file)
 
         if source not in repository_paths or target not in repository_paths:
             continue
 
+        # 依赖闭包需要同时分析调用方和被调用方，
+        # 因此这里建立无向邻接关系。
         adjacency[source].add(target)
         adjacency[target].add(source)
 
-        if (
-            source in repository_paths
-            and classify_file_kind(source) == "test"
-            and target in seed_paths
-        ):
+        if classify_file_kind(source) == "test" and target in seed_paths:
             signals[source]["testmap"] = max(
                 signals[source].get(
                     "testmap",
@@ -539,6 +546,8 @@ def _apply_dependency_signals(
 
             best_depth[neighbor] = next_depth
 
+            # 强种子已经有直接需求证据，不重复添加闭包分。
+            # 弱候选则允许补充真实结构证据。
             if neighbor not in seed_paths:
                 signals[neighbor]["dep_closure"] = max(
                     signals[neighbor].get(
@@ -557,22 +566,13 @@ def _apply_dependency_signals(
 
 
 def _apply_cochange_signals(
-    signals: dict[
-        str,
-        dict[str, float],
-    ],
+    signals: dict[str, dict[str, float]],
     cochange_index: CoChangeIndex,
     repository_paths: set[str],
 ) -> None:
-    """从直接命中文件向外扩展低权重历史共变候选。"""
+    """从强直接种子向外扩展低权重历史共变候选。"""
 
-    seed_paths = tuple(
-        sorted(
-            path
-            for path, path_signals in signals.items()
-            if ("keyword" in path_signals or "symbol" in path_signals)
-        )
-    )
+    seed_paths = tuple(sorted(_direct_seed_paths(signals)))
 
     for seed_path in seed_paths:
         neighbors = find_cochange_neighbors(
@@ -594,7 +594,7 @@ def _apply_cochange_signals(
             cochange_score = round(
                 min(
                     MAX_COCHANGE_SIGNAL,
-                    (pair.score * MAX_COCHANGE_SIGNAL),
+                    pair.score * MAX_COCHANGE_SIGNAL,
                 ),
                 3,
             )
@@ -713,7 +713,7 @@ def retrieve_candidate_pool_with_traces(
         pool_id=pool_id,
         commit=normalized_commit,
         index_digest=index_digest,
-        spec_digest=(requirement.spec_digest),
+        spec_digest=requirement.spec_digest,
         entries=selected_entries,
         expansion_rounds_used=0,
         expansion_records=(),
@@ -723,15 +723,12 @@ def retrieve_candidate_pool_with_traces(
 
     finalized_candidate = candidate.model_copy(
         update={
-            "pool_digest": compute_pool_digest(candidate),
+            "pool_digest": (compute_pool_digest(candidate)),
         }
     )
 
     ranked_by_path = {
-        entry.path: (
-            rank,
-            entry,
-        )
+        entry.path: (rank, entry)
         for rank, entry in enumerate(
             ranked,
             start=1,
@@ -796,7 +793,7 @@ def retrieve_candidate_pool_with_traces(
         )
 
     return CandidatePoolRetrievalResult(
-        candidate_pool=finalized_candidate,
+        candidate_pool=(finalized_candidate),
         traces=tuple(traces),
     )
 
@@ -815,7 +812,7 @@ def retrieve_candidate_pool(
 ) -> CandidatePool:
     """兼容旧调用方：只返回候选池，不暴露诊断轨迹。"""
 
-    result = retrieve_candidate_pool_with_traces(
+    return retrieve_candidate_pool_with_traces(
         requirement,
         repository,
         symbol_index,
@@ -825,9 +822,7 @@ def retrieve_candidate_pool(
         cochange_index=cochange_index,
         pool_id=pool_id,
         pool_limit=pool_limit,
-    )
-
-    return result.candidate_pool
+    ).candidate_pool
 
 
 def _selection_reason(
@@ -912,7 +907,7 @@ def freeze_candidate_set(
         confidence = round(
             min(
                 1.0,
-                (entry.pre_score / (entry.pre_score + 2.0)),
+                entry.pre_score / (entry.pre_score + 2.0),
             ),
             3,
         )
@@ -946,7 +941,7 @@ def freeze_candidate_set(
 
     return candidate.model_copy(
         update={
-            "set_digest": compute_set_digest(candidate),
+            "set_digest": (compute_set_digest(candidate)),
         }
     )
 
@@ -1012,5 +1007,5 @@ def build_repository_context(
         index_digest=index_digest,
         candidate_pool=pool,
         candidate_set=frozen_set,
-        retrieval_traces=retrieval.traces,
+        retrieval_traces=(retrieval.traces),
     )

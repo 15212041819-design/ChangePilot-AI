@@ -7,8 +7,9 @@
 3. 某类文件不足时能够自动补满预算；
 4. 输入顺序变化不会影响最终结果；
 5. 重复 symbol 信号会被封顶；
-6. co-change 信号会应用冻结的 2 倍权重；
-7. 二阶段分数相同时使用原始分数稳定决胜。
+6. co-change 使用冻结的 2 倍权重；
+7. dependency closure 使用冻结的 4 倍权重；
+8. 二阶段分数相同时使用原始分数稳定决胜。
 """
 
 from app.schemas.contracts import (
@@ -17,7 +18,9 @@ from app.schemas.contracts import (
     PoolEntry,
     SignalScore,
 )
-from app.tools.candidate_reranker import rerank_candidate_pool
+from app.tools.candidate_reranker import (
+    rerank_candidate_pool,
+)
 
 ZERO_HASH = "sha256:" + "0" * 64
 
@@ -78,13 +81,18 @@ def test_reranker_prevents_tests_from_filling_all_context_slots() -> None:
         _entry(
             f"app/service_{index}.py",
             kind="source",
-            score=10.0 - index / 10,
+            score=(10.0 - index / 10),
         )
         for index in range(10)
     )
 
     result = rerank_candidate_pool(
-        _pool((*tests, *sources)),
+        _pool(
+            (
+                *tests,
+                *sources,
+            )
+        ),
         budget=Budget(max_files=12),
     )
 
@@ -96,7 +104,7 @@ def test_reranker_prevents_tests_from_filling_all_context_slots() -> None:
 
 
 def test_reranker_preserves_score_order_inside_each_lane() -> None:
-    """仅有关键词信号时，各类型内部应继续保持稳定的分数顺序。"""
+    """只有关键词信号时，各类型内部应保持稳定的分数顺序。"""
 
     result = rerank_candidate_pool(
         _pool(
@@ -171,6 +179,7 @@ def test_reranker_fills_budget_when_source_candidates_are_insufficient() -> None
         "tests/test_b.py",
         "tests/test_c.py",
     }
+
     assert len(result.selected_paths) == 4
     assert result.selected_source_count == 1
     assert result.selected_test_count == 3
@@ -219,7 +228,7 @@ def test_reranker_caps_repeated_symbol_evidence() -> None:
     """重复符号命中不能压过同时拥有关键词和符号证据的源码。"""
 
     repeated_symbol = PoolEntry(
-        path="app/engines/generic.py",
+        path=("app/engines/generic.py"),
         kind="source",
         signals=(
             SignalScore(
@@ -232,7 +241,7 @@ def test_reranker_caps_repeated_symbol_evidence() -> None:
     )
 
     balanced_evidence = PoolEntry(
-        path="app/services/order.py",
+        path=("app/services/order.py"),
         kind="source",
         signals=(
             SignalScore(
@@ -265,7 +274,7 @@ def test_reranker_boosts_cochange_evidence() -> None:
     """历史共改证据应在第二阶段得到冻结的 2 倍权重。"""
 
     symbol_only = PoolEntry(
-        path="app/engines/generic.py",
+        path=("app/engines/generic.py"),
         kind="source",
         signals=(
             SignalScore(
@@ -278,7 +287,7 @@ def test_reranker_boosts_cochange_evidence() -> None:
     )
 
     cochange_supported = PoolEntry(
-        path="app/services/order.py",
+        path=("app/services/order.py"),
         kind="source",
         signals=(
             SignalScore(
@@ -299,6 +308,52 @@ def test_reranker_boosts_cochange_evidence() -> None:
             (
                 symbol_only,
                 cochange_supported,
+            )
+        ),
+        budget=Budget(max_files=1),
+    )
+
+    assert result.selected_paths == ("app/services/order.py",)
+
+
+def test_reranker_prioritizes_dependency_evidence() -> None:
+    """当前快照中的依赖事实应高于单一的重复符号命中。"""
+
+    symbol_only = PoolEntry(
+        path=("app/engines/generic.py"),
+        kind="source",
+        signals=(
+            SignalScore(
+                name="symbol",
+                value=6.0,
+            ),
+        ),
+        pre_score=6.0,
+        source="baseline",
+    )
+
+    dependency_supported = PoolEntry(
+        path=("app/services/order.py"),
+        kind="source",
+        signals=(
+            SignalScore(
+                name="keyword",
+                value=0.2,
+            ),
+            SignalScore(
+                name="dep_closure",
+                value=1.0,
+            ),
+        ),
+        pre_score=1.2,
+        source="baseline",
+    )
+
+    result = rerank_candidate_pool(
+        _pool(
+            (
+                symbol_only,
+                dependency_supported,
             )
         ),
         budget=Budget(max_files=1),
