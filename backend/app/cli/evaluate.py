@@ -38,6 +38,11 @@ from langchain_core.language_models.chat_models import (
 from app.tools.evaluation_dataset import (
     build_evaluation_dataset,
 )
+from app.tools.evaluation_requirements import (
+    create_recording_requirement_store,
+    load_requirement_artifact,
+    write_requirement_artifact,
+)
 from app.tools.evaluation_runner import (
     EvaluationExperimentResult,
     EvaluationRunInvalidError,
@@ -69,7 +74,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="changepilot-evaluate",
-        description=("从 Git 历史构建无泄漏样本，并运行 ChangePilot AI 证据驱动评测。"),
+        description="从 Git 历史构建无泄漏样本，并运行 ChangePilot AI 证据驱动评测。",
     )
 
     parser.add_argument(
@@ -80,7 +85,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ref",
         default="HEAD",
-        help=("从哪个 Git ref 开始向前筛选提交，默认 HEAD。"),
+        help="从哪个 Git ref 开始向前筛选提交，默认 HEAD。",
     )
 
     parser.add_argument(
@@ -94,20 +99,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--scan-limit",
         type=int,
         default=200,
-        help=("最多检查多少条历史提交，默认 200。"),
+        help="最多检查多少条历史提交，默认 200。",
     )
 
     parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
-        help=("JSON 报告路径，默认 evals/results/new-retrieval-deterministic-impact.json。"),
+        help="JSON 报告路径，默认 evals/results/new-retrieval-deterministic-impact.json。",
     )
 
     parser.add_argument(
         "--experiment-name",
         default=None,
-        help=("写入报告的实验名称；省略时根据 context mode 自动生成。"),
+        help="写入报告的实验名称；省略时根据 context mode 自动生成。",
     )
 
     parser.add_argument(
@@ -129,21 +134,40 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--pool-limit",
         type=int,
         default=50,
-        help=("CandidatePool 文件上限，范围 1 到 60，默认 50。"),
+        help="CandidatePool 文件上限，范围 1 到 60，默认 50。",
     )
 
     parser.add_argument(
         "--max-repository-files",
         type=int,
         default=200,
-        help=("单个快照最多扫描的仓库文件数，默认 200。"),
+        help="单个快照最多扫描的仓库文件数，默认 200。",
     )
 
     parser.add_argument(
         "--max-file-size-bytes",
         type=int,
         default=50_000,
-        help=("单个文件最大读取字节数，默认 50000。"),
+        help="单个文件最大读取字节数，默认 50000。",
+    )
+
+    requirement_group = parser.add_mutually_exclusive_group()
+
+    requirement_group.add_argument(
+        "--write-requirement-specs",
+        type=Path,
+        default=None,
+        help=(
+            "调用 Requirement Agent 一次生成需求，"
+            "并将完整样本集的已审批 RequirementSpec 写入 JSON 工件。"
+        ),
+    )
+
+    requirement_group.add_argument(
+        "--requirement-specs",
+        type=Path,
+        default=None,
+        help=("回放已冻结的 RequirementSpec JSON 工件；工件与数据集不一致时会在调用模型前失败。"),
     )
 
     return parser
@@ -166,6 +190,16 @@ def _validate_cli_values(
     if args.output.suffix.casefold() != ".json":
         raise ValueError("--output 必须使用 .json 扩展名。")
 
+    for option_name, path in (
+        ("--write-requirement-specs", args.write_requirement_specs),
+        ("--requirement-specs", args.requirement_specs),
+    ):
+        if path is not None and path.suffix.casefold() != ".json":
+            raise ValueError(f"{option_name} 必须使用 .json 扩展名。")
+
+        if path is not None and path.expanduser().resolve() == args.output.expanduser().resolve():
+            raise ValueError(f"{option_name} 不能与 --output 使用同一路径。")
+
 
 def result_to_json_payload(
     result: EvaluationExperimentResult,
@@ -177,7 +211,7 @@ def result_to_json_payload(
         "experiment_name": result.experiment_name,
         "dataset": asdict(result.dataset),
         "observations": [asdict(observation) for observation in result.observations],
-        "cochange_leak_reports": [asdict(report) for report in (result.cochange_leak_reports)],
+        "cochange_leak_reports": [asdict(report) for report in result.cochange_leak_reports],
         "metrics": asdict(result.metrics),
     }
 
@@ -250,11 +284,25 @@ def run_evaluation_cli(
             "没有筛选到可评测提交；请检查提交信息长度、改动文件数或提高 --scan-limit。"
         )
 
+    requirement_store = None
+
+    if args.write_requirement_specs is not None:
+        requirement_store = create_recording_requirement_store(
+            dataset,
+        )
+
+    elif args.requirement_specs is not None:
+        requirement_store = load_requirement_artifact(
+            args.requirement_specs,
+            dataset,
+        )
+
     adapter = create_evidence_impact_adapter(
         model=model,
+        requirement_store=requirement_store,
         config=EvidenceImpactAdapterConfig(
-            max_repository_files=(args.max_repository_files),
-            max_file_size_bytes=(args.max_file_size_bytes),
+            max_repository_files=args.max_repository_files,
+            max_file_size_bytes=args.max_file_size_bytes,
             pool_limit=args.pool_limit,
             context_mode=args.context_mode,
         ),
@@ -270,6 +318,17 @@ def run_evaluation_cli(
         adapter,
         experiment_name=experiment_name,
     )
+
+    if args.write_requirement_specs is not None:
+        if requirement_store is None:
+            raise RuntimeError("记录需求工件时未创建 requirement_store。")
+
+        # 只有 15 条样本全部生成需求后才会写文件。
+        # 某条 Requirement Agent 失败时 build_artifact 会拒绝产生部分工件。
+        write_requirement_artifact(
+            requirement_store,
+            args.write_requirement_specs,
+        )
 
     output_path = write_evaluation_result(
         result,

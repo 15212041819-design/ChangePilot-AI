@@ -1,0 +1,1414 @@
+{
+  "artifact_digest": "sha256:11ca58af58998be67226b14abab72313f95e746ad1c534819a32571a5332ef4a",
+  "dataset_digest": "sha256:a481e7a916a02c9eb89b59ea0a21becaa54f9821085c62d7a0f144a0203083fe",
+  "entries": [
+    {
+      "analysis_commit": "cac2372f73bd356570b1eab32dd320a65c32c97a",
+      "answer_commit": "0da59f95cf338a4521d1c76c6788d754ab6c63ef",
+      "request_digest": "sha256:7deb381412e8f3a387839813e95f300e7b9454bbe28a42a157c52107456b8539",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system shall record candidate scoring traces.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "A candidate scoring process already exists, and the trace recording must be integrated into it."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "The storage format and location for the traces are not specified in the requirement and need to be confirmed later."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "candidate scoring trace",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "candidate scoring traces",
+              "scoring trace",
+              "scoring traces"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "CandidateScoringTrace",
+              "candidate_scoring_trace",
+              "scoring_trace"
+            ],
+            "unverified": [
+              "CandidateScoringTrace",
+              "candidate_scoring_trace",
+              "scoring_trace"
+            ]
+          },
+          {
+            "concept": "candidate scoring",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "candidate scoring",
+              "scoring"
+            ],
+            "role": "subject",
+            "symbol_candidates": [
+              "CandidateScoring",
+              "candidate_scoring"
+            ],
+            "unverified": [
+              "CandidateScoring",
+              "candidate_scoring"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: record candidate scoring traces",
+        "spec_digest": "sha256:d99863a5f526215e6de817e7a8ac1949c3f17608a0758cdcbd241ebc842df01c",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Record candidate scoring traces",
+        "symbol_hints": []
+      },
+      "sample_id": "git-0da59f95cf33"
+    },
+    {
+      "analysis_commit": "0da59f95cf338a4521d1c76c6788d754ab6c63ef",
+      "answer_commit": "1131b1212bf6c851407b4b8c4ca556300767107d",
+      "request_digest": "sha256:0b80a38484aaf41e8fc49d07b15666c847983723618967a8c9afe8b2a8369086",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system propagates candidate scoring evidence from the producer side to the consumer side.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "Candidate scoring evidence already exists before propagation."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "There is a downstream consumer that expects candidate scoring evidence."
+          },
+          {
+            "id": "AS-003",
+            "impact": [],
+            "status": "accepted",
+            "text": "The exact transport mechanism for propagation is not specified."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "candidate scoring evidence",
+            "concept_id": "EH-001",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "candidate scoring",
+              "evidence",
+              "scoring evidence"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "CandidateScoringEvidence",
+              "candidate_scoring_evidence"
+            ],
+            "unverified": [
+              "CandidateScoringEvidence",
+              "candidate_scoring_evidence"
+            ]
+          },
+          {
+            "concept": "propagate",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "propagate",
+              "propagation"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "propagateCandidateScoringEvidence"
+            ],
+            "unverified": [
+              "propagateCandidateScoringEvidence"
+            ]
+          },
+          {
+            "concept": "candidate",
+            "concept_id": "EH-003",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "candidates"
+            ],
+            "role": "subject",
+            "symbol_candidates": [
+              "Candidate"
+            ],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: propagate candidate scoring evidence",
+        "spec_digest": "sha256:770ee95d263182f48b4a55fe5211a757badd10aadf3e2ba8908a86e23babd5c3",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Propagate candidate scoring evidence",
+        "symbol_hints": []
+      },
+      "sample_id": "git-1131b1212bf6"
+    },
+    {
+      "analysis_commit": "6a092bc9811184ce24e36ca1300fcfdefdce1f4b",
+      "answer_commit": "255471b47f6b12eb4ef736f30548862cb93fc6ce",
+      "request_digest": "sha256:9671eb12c8ea8177b9b56dd0917a71a5e8cd71b8ac75a0700b85e5a37643b923",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "Cochange retrieval is available as an integrated capability.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          },
+          {
+            "derived_from": null,
+            "description": "Cochange retrieval is performed in a leak-safe manner.",
+            "id": "AC-002",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [],
+        "change_type": "feature",
+        "constraints": [
+          "leak-safe"
+        ],
+        "entity_hints": [
+          {
+            "concept": "cochange retrieval",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "co-change retrieval",
+              "cochange retrieval"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "CochangeRetrieval",
+              "cochangeRetrieval"
+            ],
+            "unverified": [
+              "CochangeRetrieval",
+              "cochangeRetrieval"
+            ]
+          },
+          {
+            "concept": "leak-safe",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "leak safe",
+              "leak-safe"
+            ],
+            "role": "constraint",
+            "symbol_candidates": [],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: integrate leak-safe cochange retrieval",
+        "spec_digest": "sha256:156931b7ee9044cd1d9bee8fc09c1cafa1db8934ec8b7477d84e0f653244ca4c",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Integrate leak-safe cochange retrieval",
+        "symbol_hints": []
+      },
+      "sample_id": "git-255471b47f6b"
+    },
+    {
+      "analysis_commit": "aeec45b8822ee52e3f9e97b55c15132155b23775",
+      "answer_commit": "34eb48ae17dc50e3857f8716d21435140a783174",
+      "request_digest": "sha256:0ee42ab73fedce485520a2f6df9943497a3715089ee72797eeca34d2e8e57cc2",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system provides an evaluation metrics calculator that can be used to calculate evaluation metrics.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The specific evaluation metrics, calculation rules, and input/output formats are not specified and need clarification."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "evaluation metrics calculator",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "evaluation metric calculator",
+              "evaluation metrics",
+              "metrics calculator"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add evaluation metrics calculator",
+        "spec_digest": "sha256:7395b5cc9fbf7c5a237a1dd759e369774033b6b3523b90d0cd632f3ade39bb8f",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add an evaluation metrics calculator feature.",
+        "symbol_hints": []
+      },
+      "sample_id": "git-34eb48ae17dc"
+    },
+    {
+      "analysis_commit": "a71ec6c14d7c9c750a14bca601bae5e07e82d1c6",
+      "answer_commit": "3a61692de3294931368068aad5756e51df7395a9",
+      "request_digest": "sha256:fac48101ad867e1f1d94cf72e230f4549a14d9946a24cf0c00cdabb6f1db86ff",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "A command line runner for evaluation can be invoked.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The evaluation functionality to be run already exists or can be invoked independently of the command line runner."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "The command line runner is intended to be executed from a terminal or shell."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "evaluation",
+            "concept_id": "EH-001",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "eval",
+              "evaluate"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "eval",
+              "evaluate",
+              "evaluation"
+            ],
+            "unverified": [
+              "eval",
+              "evaluate"
+            ]
+          },
+          {
+            "concept": "command line runner",
+            "concept_id": "EH-002",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "CLI runner",
+              "command runner"
+            ],
+            "role": "subject",
+            "symbol_candidates": [
+              "cli_runner",
+              "command_line_runner",
+              "runner"
+            ],
+            "unverified": [
+              "cli_runner",
+              "command_line_runner"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add evaluation command line runner",
+        "spec_digest": "sha256:07de27b9c27876c2e5e65d19fca24d232668386b1a1875acc8f8bf32b647a47c",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add an evaluation command line runner.",
+        "symbol_hints": []
+      },
+      "sample_id": "git-3a61692de329"
+    },
+    {
+      "analysis_commit": "3fdc632b098d5a5a0d3a27634cf19545e975b213",
+      "answer_commit": "42432de04fb51c24df94171f6e246cf9ab55d314",
+      "request_digest": "sha256:33a14d19bc17d87c79c89972c48671d888a11a4a32d739f1423838bf9e59b373",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "An impact analysis engine is available.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          },
+          {
+            "derived_from": null,
+            "description": "Given identical inputs, the impact analysis engine produces identical impact analysis results.",
+            "id": "AC-002",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "test"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The exact inputs and outputs of the impact analysis engine are not specified in this requirement."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "The scope of impact analysis is not defined in this requirement."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [
+          "The engine must be deterministic."
+        ],
+        "entity_hints": [
+          {
+            "concept": "impact analysis engine",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "deterministic impact analysis",
+              "impact analysis",
+              "impact analysis engine"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "ImpactAnalysisEngine"
+            ],
+            "unverified": [
+              "ImpactAnalysisEngine"
+            ]
+          },
+          {
+            "concept": "deterministic behavior",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "determinism",
+              "deterministic"
+            ],
+            "role": "constraint",
+            "symbol_candidates": [],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add deterministic impact analysis engine",
+        "spec_digest": "sha256:7c58da24cba1d864e3d7cd227a656970eb9b4a57dc60c3449846d1d7ac876754",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add deterministic impact analysis engine",
+        "symbol_hints": []
+      },
+      "sample_id": "git-42432de04fb5"
+    },
+    {
+      "analysis_commit": "6e9b4a78d8cc5bfd6f61584dfcfbeb879995ed9d",
+      "answer_commit": "65bd65eb7dfea88d8dcf8fcdbcce932c6f40a35f",
+      "request_digest": "sha256:88857b3ce38e4c48bc14d8e6b70d78170b8f78cdc6b0c51c33ec890b566c655d",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system provides a command for offline evaluation rescoring.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The command will be integrated into the existing CLI entrypoint."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "There is an existing offline evaluation rescoring capability that the command can invoke."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "offline evaluation rescore command",
+            "concept_id": "EH-001",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "command",
+              "offline evaluation",
+              "rescore"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "offline_evaluation_rescore",
+              "rescore_command"
+            ],
+            "unverified": [
+              "offline_evaluation_rescore",
+              "rescore_command"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add offline evaluation rescore command",
+        "spec_digest": "sha256:3f15e1547d66df08915b9939368195dae2e78b0ec8570f303d9114b143082342",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add offline evaluation rescore command",
+        "symbol_hints": []
+      },
+      "sample_id": "git-65bd65eb7dfe"
+    },
+    {
+      "analysis_commit": "84233904ea4e0b4e25698e657b28d77f5f46cd0b",
+      "answer_commit": "6a092bc9811184ce24e36ca1300fcfdefdce1f4b",
+      "request_digest": "sha256:1309afa9dacc679b303b436710a002f5b2fbbacb4edf200a39816c25295781ac",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "A git cochange index is added.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          },
+          {
+            "derived_from": null,
+            "description": "The added git cochange index is leak-safe.",
+            "id": "AC-002",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "test"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "Leak-safe refers to not leaking memory or resources during index creation and updates."
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "The git cochange index is derived from files that change together in git history."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [
+          "leak-safe"
+        ],
+        "entity_hints": [
+          {
+            "concept": "git cochange index",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "co-change index",
+              "cochange",
+              "cochange index",
+              "git cochange"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "CochangeIndex",
+              "GitCochangeIndex"
+            ],
+            "unverified": [
+              "CochangeIndex",
+              "GitCochangeIndex"
+            ]
+          },
+          {
+            "concept": "leak safety",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "leak safe",
+              "leak-safe",
+              "no leaks"
+            ],
+            "role": "constraint",
+            "symbol_candidates": [],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add leak-safe git cochange index",
+        "spec_digest": "sha256:0be0d49da2a996ce2785198c3c88e05f93520c8cd6188404d54ed413f941e0b3",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add a leak-safe git cochange index.",
+        "symbol_hints": []
+      },
+      "sample_id": "git-6a092bc98111"
+    },
+    {
+      "analysis_commit": "3a61692de3294931368068aad5756e51df7395a9",
+      "answer_commit": "6e9b4a78d8cc5bfd6f61584dfcfbeb879995ed9d",
+      "request_digest": "sha256:db9a013679671cf9f5b0d69dd36db46c45760e10807cf12a933759044e68a446",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "New files are separated from evaluation recall",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The exact separation behavior is not specified; it is assumed that new files should not appear as part of the evaluation recall results."
+          }
+        ],
+        "change_type": "fix",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "new files",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "new file",
+              "newly added file"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "newFile",
+              "new_files",
+              "newly_created_files"
+            ],
+            "unverified": [
+              "newFile",
+              "new_files",
+              "newly_created_files"
+            ]
+          },
+          {
+            "concept": "evaluation recall",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "evaluation recall",
+              "recall"
+            ],
+            "role": "subject",
+            "symbol_candidates": [
+              "evaluation_recall",
+              "recall"
+            ],
+            "unverified": [
+              "evaluation_recall",
+              "recall"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "fix: separate new files from evaluation recall",
+        "spec_digest": "sha256:1157519306cec9aebe605d586799a09cf6a2d58e7bdd8ec7f0190e4a985a3903",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Separate new files from evaluation recall",
+        "symbol_hints": []
+      },
+      "sample_id": "git-6e9b4a78d8cc"
+    },
+    {
+      "analysis_commit": "8aa11e5f3aa5b30bd626b75ba32547055f12b871",
+      "answer_commit": "84233904ea4e0b4e25698e657b28d77f5f46cd0b",
+      "request_digest": "sha256:902ac73f57b8ff91b436b748b50facc495814dc5be9983206d3e80d0bbb1064b",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system can analyze isolated git snapshots.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "There is an accessible data source of isolated Git snapshots to analyze, and analysis does not modify them."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "isolated git snapshots",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "git snapshot",
+              "isolated git snapshot",
+              "snapshot"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "git_snapshot",
+              "isolated_snapshot",
+              "snapshot"
+            ],
+            "unverified": [
+              "git_snapshot",
+              "isolated_snapshot",
+              "snapshot"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: analyze isolated git snapshots",
+        "spec_digest": "sha256:7dc8e93942bebe80acd4f30d1487b841e8e6ca5539b9104b254a0fd441e55906",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Analyze isolated git snapshots",
+        "symbol_hints": []
+      },
+      "sample_id": "git-84233904ea4e"
+    },
+    {
+      "analysis_commit": "eed883d23b7eb279528fa7befa74592267e86807",
+      "answer_commit": "8aa11e5f3aa5b30bd626b75ba32547055f12b871",
+      "request_digest": "sha256:965e8b87ed5b0af49c22b0e7f766d42b55f68308ffba06633844ed90beec101f",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "Evidence analysis runtime is wired into the system.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "There is an existing evidence analysis runtime component to wire into the system."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "evidence analysis runtime",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "evidence analysis",
+              "evidence runtime",
+              "runtime"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "EvidenceAnalysisRuntime",
+              "evidenceAnalysisRuntime"
+            ],
+            "unverified": [
+              "EvidenceAnalysisRuntime",
+              "evidenceAnalysisRuntime"
+            ]
+          },
+          {
+            "concept": "wiring",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "connect",
+              "integration",
+              "wire"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [],
+            "unverified": []
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: wire evidence analysis runtime",
+        "spec_digest": "sha256:25aaf563a1a81fa1fb6be32c16d2ecee52a9115164933cd40c7134b94cc8d066",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Wire evidence analysis runtime",
+        "symbol_hints": []
+      },
+      "sample_id": "git-8aa11e5f3aa5"
+    },
+    {
+      "analysis_commit": "ff9ddf328282c4caa2eba6082e7f04555aa4f9df",
+      "answer_commit": "a71ec6c14d7c9c750a14bca601bae5e07e82d1c6",
+      "request_digest": "sha256:c0587a745633e8da83d15408c50b7731baaa386d9b4dd0c7cb3995408ffb5a24",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system includes an evidence impact evaluation adapter.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "static"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "The adapter's interface, inputs, outputs, and integration point are not specified and must be clarified before implementation."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "evidence impact evaluation adapter",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "evidence adapter",
+              "evidence impact evaluation",
+              "impact evaluation adapter"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "EvidenceImpactEvaluationAdapter",
+              "ImpactEvaluationAdapter",
+              "evidence_impact_evaluation_adapter"
+            ],
+            "unverified": [
+              "EvidenceImpactEvaluationAdapter",
+              "ImpactEvaluationAdapter",
+              "evidence_impact_evaluation_adapter"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add evidence impact evaluation adapter",
+        "spec_digest": "sha256:49226496390240c305b228f7d7fe68172e241c5e715c60a4e304bd9557bb650f",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add an evidence impact evaluation adapter.",
+        "symbol_hints": []
+      },
+      "sample_id": "git-a71ec6c14d7c"
+    },
+    {
+      "analysis_commit": "255471b47f6b12eb4ef736f30548862cb93fc6ce",
+      "answer_commit": "aeec45b8822ee52e3f9e97b55c15132155b23775",
+      "request_digest": "sha256:4406b75bd3374ebb50f39be624250fb1970512068d75306526b0692563ffa335",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "系统提供 evaluation dataset builder，可构建评估数据集。",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          },
+          {
+            "derived_from": null,
+            "description": "生成的评估数据集满足 leak-free 要求。",
+            "id": "AC-002",
+            "priority": "P0",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "leak-free 指评估数据集与训练数据或其他数据源之间不存在信息泄漏。"
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "该构建器将被集成到现有数据集构建流程中。"
+          },
+          {
+            "id": "AS-003",
+            "impact": [],
+            "status": "accepted",
+            "text": "评估数据集的格式与下游评估流程兼容。"
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [
+          "评估数据集必须满足 leak-free 约束。"
+        ],
+        "entity_hints": [
+          {
+            "concept": "evaluation dataset builder",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "dataset builder",
+              "eval dataset builder",
+              "evaluation dataset builder"
+            ],
+            "role": "action_target",
+            "symbol_candidates": [
+              "EvaluationDatasetBuilder",
+              "build_evaluation_dataset",
+              "evaluation_dataset_builder"
+            ],
+            "unverified": [
+              "EvaluationDatasetBuilder",
+              "build_evaluation_dataset",
+              "evaluation_dataset_builder"
+            ]
+          },
+          {
+            "concept": "evaluation dataset",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "eval dataset",
+              "evaluation data",
+              "evaluation dataset"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "EvaluationDataset",
+              "evaluation_dataset"
+            ],
+            "unverified": [
+              "EvaluationDataset",
+              "evaluation_dataset"
+            ]
+          },
+          {
+            "concept": "leak-free",
+            "concept_id": "EH-003",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "data leakage",
+              "leak-free",
+              "leakage-free",
+              "no leakage"
+            ],
+            "role": "constraint",
+            "symbol_candidates": [
+              "LeakFree",
+              "leak_free",
+              "no_leakage"
+            ],
+            "unverified": [
+              "LeakFree",
+              "leak_free",
+              "no_leakage"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add leak-free evaluation dataset builder",
+        "spec_digest": "sha256:fe395ea6368a83ba53d75365240efe0c633f0a79d6102875905a826e0fed7fed",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "添加一个无泄漏的评估数据集构建器。",
+        "symbol_hints": []
+      },
+      "sample_id": "git-aeec45b8822e"
+    },
+    {
+      "analysis_commit": "65bd65eb7dfea88d8dcf8fcdbcce932c6f40a35f",
+      "answer_commit": "cac2372f73bd356570b1eab32dd320a65c32c97a",
+      "request_digest": "sha256:7ebb258f610aee4b2bcafa57fb5c3073a1de2a6fc6474d7812e5843b2ea910ee",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "系统能够输出候选排名诊断信息。",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "诊断功能用于查看或分析候选排序的依据或结果。"
+          },
+          {
+            "id": "AS-002",
+            "impact": [],
+            "status": "accepted",
+            "text": "诊断输出形式未指定，假设为可人工查看的信息。"
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [],
+        "entity_hints": [
+          {
+            "concept": "candidate ranking diagnostics",
+            "concept_id": "EH-001",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "candidate ranking",
+              "diagnostics",
+              "ranking diagnostics"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "candidateRankingDiagnostics",
+              "rankingDiagnostics"
+            ],
+            "unverified": [
+              "candidateRankingDiagnostics",
+              "rankingDiagnostics"
+            ]
+          },
+          {
+            "concept": "candidate ranking",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "candidate ranking",
+              "ranking"
+            ],
+            "role": "subject",
+            "symbol_candidates": [
+              "candidateRanking"
+            ],
+            "unverified": [
+              "candidateRanking"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add candidate ranking diagnostics",
+        "spec_digest": "sha256:1e42b4ce0267325946d793b579aa1a09b7f480535b2a96c5132f754e6ec5125b",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add candidate ranking diagnostics.",
+        "symbol_hints": []
+      },
+      "sample_id": "git-cac2372f73bd"
+    },
+    {
+      "analysis_commit": "34eb48ae17dc50e3857f8716d21435140a783174",
+      "answer_commit": "ff9ddf328282c4caa2eba6082e7f04555aa4f9df",
+      "request_digest": "sha256:36f8a628941a22ea056d55c363752bd28b5449898c6a1cc770477883c358aed1",
+      "requirement_spec": {
+        "acceptance_criteria": [
+          {
+            "derived_from": null,
+            "description": "The system provides an isolated evaluation runner.",
+            "id": "AC-001",
+            "priority": "P1",
+            "status": "active",
+            "supersedes": [],
+            "verification": "manual"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "AS-001",
+            "impact": [],
+            "status": "accepted",
+            "text": "Isolation may be implemented via a separate process, container, or sandbox."
+          }
+        ],
+        "change_type": "feature",
+        "constraints": [
+          "The evaluation runner must run in isolation."
+        ],
+        "entity_hints": [
+          {
+            "concept": "evaluation runner",
+            "concept_id": "EH-001",
+            "in_repo_vocab": true,
+            "lexical_variants": [
+              "evaluation runner",
+              "runner"
+            ],
+            "role": "object",
+            "symbol_candidates": [
+              "EvaluationRunner",
+              "IsolatedEvaluationRunner"
+            ],
+            "unverified": [
+              "EvaluationRunner",
+              "IsolatedEvaluationRunner"
+            ]
+          },
+          {
+            "concept": "isolation",
+            "concept_id": "EH-002",
+            "in_repo_vocab": false,
+            "lexical_variants": [
+              "isolated",
+              "isolation"
+            ],
+            "role": "constraint",
+            "symbol_candidates": [
+              "Container",
+              "Isolation",
+              "ProcessIsolation",
+              "Sandbox"
+            ],
+            "unverified": [
+              "Container",
+              "Isolation",
+              "ProcessIsolation",
+              "Sandbox"
+            ]
+          }
+        ],
+        "scope_hints": {
+          "allow_breaking": false,
+          "exclude": [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache"
+          ],
+          "include": [],
+          "max_chars_per_file": 4000,
+          "max_files": 12,
+          "target_modules": []
+        },
+        "source_text": "feat: add isolated evaluation runner",
+        "spec_digest": "sha256:f538be93ea4b716edbd98145c383466df3c2778db71a9ca929b944aa7520d950",
+        "spec_id": "RS-0001",
+        "spec_revision": 1,
+        "summary": "Add isolated evaluation runner",
+        "symbol_hints": []
+      },
+      "sample_id": "git-ff9ddf328282"
+    }
+  ],
+  "schema_version": "1.0"
+}

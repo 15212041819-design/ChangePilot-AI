@@ -9,7 +9,13 @@ from langchain_core.language_models.fake_chat_models import (
 )
 
 from app.schemas.evaluation import (
+    EvaluationDataset,
     EvaluationSample,
+)
+from app.tools.evaluation_requirements import (
+    create_recording_requirement_store,
+    load_requirement_artifact,
+    write_requirement_artifact,
 )
 from app.tools.evaluation_runner import (
     EvaluationCaseContext,
@@ -63,7 +69,7 @@ def _model_response_with_assumption() -> str:
 
     return _model_response().replace(
         '"assumptions": []',
-        ('"assumptions": [{"text": "默认沿用现有订单权限模型。"}]'),
+        '"assumptions": [{"text": "默认沿用现有订单权限模型。"}]',
     )
 
 
@@ -75,11 +81,9 @@ def _semantic_decision(
     return json.dumps(
         {
             "needs_more_context": False,
-            "selected_paths": list(
-                selected_paths,
-            ),
+            "selected_paths": list(selected_paths),
             "queries": [],
-            "explanation": ("根据需求实体、符号和依赖证据选择目标文件。"),
+            "explanation": "根据需求实体、符号和依赖证据选择目标文件。",
         },
         ensure_ascii=False,
     )
@@ -94,7 +98,6 @@ def _context(
     repository = tmp_path / "order_service"
 
     service = repository / "order_app" / "service.py"
-
     test_file = repository / "tests" / "test_service.py"
 
     service.parent.mkdir(
@@ -112,11 +115,9 @@ def _context(
 
     test_file.write_text(
         (
-            "from order_app.service "
-            "import OrderService\n\n"
+            "from order_app.service import OrderService\n\n"
             "def test_cancel_order() -> None:\n"
-            "    OrderService()"
-            ".cancel_order('1')\n"
+            "    OrderService().cancel_order('1')\n"
         ),
         encoding="utf-8",
     )
@@ -124,7 +125,7 @@ def _context(
     sample = EvaluationSample(
         sample_id="git-bbbbbbbbbbbb",
         repository_relative_path="",
-        request_text=("为订单系统实现所属用户取消待支付订单功能"),
+        request_text="为订单系统实现所属用户取消待支付订单功能",
         analysis_commit=commit,
         answer_commit="b" * 40,
         changed_files=(
@@ -176,28 +177,21 @@ def test_adapter_runs_real_retrieval_guard_and_impact_engine(
     )
 
     assert observation.status == "success"
-
     assert "order_app/service.py" in observation.candidate_pool_paths
-
     assert "order_app/service.py" in observation.selected_paths
-
     assert observation.reported_paths == ("order_app/service.py",)
-
     assert observation.invalid_reported_paths == ()
-
     assert observation.analyzed_item_count >= 1
-
     assert observation.assigned_item_count >= observation.analyzed_item_count
-
     assert observation.latency_ms >= 0
 
     # 评分轨迹必须完整对应候选池顺序。
     assert (
-        tuple(trace.path for trace in (observation.candidate_score_traces))
+        tuple(trace.path for trace in observation.candidate_score_traces)
         == observation.candidate_pool_paths
     )
 
-    assert tuple(trace.pool_rank for trace in (observation.candidate_score_traces)) == tuple(
+    assert tuple(trace.pool_rank for trace in observation.candidate_score_traces) == tuple(
         range(
             1,
             len(observation.candidate_pool_paths) + 1,
@@ -206,7 +200,7 @@ def test_adapter_runs_real_retrieval_guard_and_impact_engine(
 
     service_trace = next(
         trace
-        for trace in (observation.candidate_score_traces)
+        for trace in observation.candidate_score_traces
         if trace.path == "order_app/service.py"
     )
 
@@ -240,9 +234,7 @@ def test_adapter_indexes_python_only_once(
 
         call_count += 1
 
-        return real_indexer(
-            repository,
-        )
+        return real_indexer(repository)
 
     monkeypatch.setattr(
         adapter_module,
@@ -289,20 +281,80 @@ def test_adapter_runs_semantic_context_mode_without_changing_impact_engine(
     )
 
     assert observation.status == "success"
-
     assert "order_app/service.py" in observation.candidate_pool_paths
-
     assert observation.selected_paths == ("order_app/service.py",)
-
     assert observation.reported_paths == ("order_app/service.py",)
-
     assert observation.invalid_reported_paths == ()
 
     # 语义重排不能破坏候选池评分证据。
     assert (
-        tuple(trace.path for trace in (observation.candidate_score_traces))
+        tuple(trace.path for trace in observation.candidate_score_traces)
         == observation.candidate_pool_paths
     )
+
+
+def test_semantic_adapter_replays_recorded_requirement_without_second_requirement_call(
+    tmp_path: Path,
+) -> None:
+    """A/B 两组必须复用同一份 RequirementSpec。"""
+
+    context = _context(tmp_path)
+
+    dataset = EvaluationDataset(
+        repository_relative_path="",
+        requested_ref="HEAD",
+        resolved_ref="c" * 40,
+        scanned_commit_count=1,
+        samples=(context.sample,),
+        rejected_root_count=0,
+        rejected_merge_count=0,
+        rejected_short_message_count=0,
+        rejected_file_count_count=0,
+        rejected_pure_test_count=0,
+    )
+
+    store = create_recording_requirement_store(dataset)
+
+    deterministic = create_evidence_impact_adapter(
+        model=FakeListChatModel(
+            responses=[
+                _model_response_with_assumption(),
+            ]
+        ),
+        requirement_store=store,
+    )
+
+    deterministic(context)
+
+    artifact_path = write_requirement_artifact(
+        store,
+        tmp_path / "requirements.json",
+    )
+
+    replay_store = load_requirement_artifact(
+        artifact_path,
+        dataset,
+    )
+
+    # 回放时假模型只有一条 Semantic Mapping 输出。
+    # 如果适配器错误地先调用 Requirement Agent，
+    # 该输出会无法解析成 RequirementSpecDraft，测试必然失败。
+    semantic = create_evidence_impact_adapter(
+        model=FakeListChatModel(
+            responses=[
+                _semantic_decision("order_app/service.py"),
+            ]
+        ),
+        config=EvidenceImpactAdapterConfig(
+            context_mode="semantic",
+        ),
+        requirement_store=replay_store,
+    )
+
+    observation = semantic(context)
+
+    assert observation.status == "success"
+    assert observation.selected_paths == ("order_app/service.py",)
 
 
 def test_adapter_rejects_empty_repository(
@@ -318,7 +370,7 @@ def test_adapter_rejects_empty_repository(
     sample = EvaluationSample(
         sample_id="git-bbbbbbbbbbbb",
         repository_relative_path="",
-        request_text=("实现一个有意义的软件功能变更"),
+        request_text="实现一个有意义的软件功能变更",
         analysis_commit=commit,
         answer_commit="b" * 40,
         changed_files=("app/service.py",),
@@ -342,7 +394,7 @@ def test_adapter_rejects_empty_repository(
             pairs=(),
             history_truncated=False,
             pairs_truncated=False,
-            history_digest=(ZERO_HISTORY_DIGEST),
+            history_digest=ZERO_HISTORY_DIGEST,
         ),
     )
 

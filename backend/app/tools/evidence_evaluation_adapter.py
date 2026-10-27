@@ -56,6 +56,9 @@ from app.tools.contract_digest import (
     compute_spec_digest,
     normalize_digest_path,
 )
+from app.tools.evaluation_requirements import (
+    EvaluationRequirementStore,
+)
 from app.tools.evaluation_runner import (
     EvaluationCaseContext,
 )
@@ -109,9 +112,11 @@ class EvidenceGroundedImpactEvaluationAdapter:
         *,
         model: BaseChatModel | None = None,
         config: EvidenceImpactAdapterConfig | None = None,
+        requirement_store: EvaluationRequirementStore | None = None,
     ) -> None:
         self._model = model
         self._config = config or EvidenceImpactAdapterConfig()
+        self._requirement_store = requirement_store
 
     @staticmethod
     def _prepare_offline_requirement(
@@ -158,6 +163,38 @@ class EvidenceGroundedImpactEvaluationAdapter:
             }
         )
 
+    def _resolve_requirement(
+        self,
+        context: EvaluationCaseContext,
+        *,
+        repository_vocabulary: set[str],
+    ) -> RequirementSpec:
+        """生成或回放与样本绑定的唯一需求契约。
+
+        未配置存储器时保留原有行为。记录模式会在首次调用时
+        运行 Requirement Agent 并保存结果；回放模式直接返回冻结
+        RequirementSpec，``generate`` 回调绝不会执行。
+        """
+
+        def generate() -> RequirementSpec:
+            result = analyze_requirement_spec(
+                context.sample.request_text,
+                repository_vocabulary=(repository_vocabulary),
+                model=self._model,
+            )
+
+            return self._prepare_offline_requirement(
+                result,
+            )
+
+        if self._requirement_store is None:
+            return generate()
+
+        return self._requirement_store.resolve(
+            context.sample,
+            generate=generate,
+        )
+
     def __call__(
         self,
         context: EvaluationCaseContext,
@@ -197,18 +234,11 @@ class EvidenceGroundedImpactEvaluationAdapter:
             dependency_graph,
         )
 
-        requirement_result = analyze_requirement_spec(
-            context.sample.request_text,
-            repository_vocabulary=set(
-                repository_vocabulary,
-            ),
-            model=self._model,
-        )
-
-        # 离线评测没有真人交互，因此两组实验统一使用
-        # 自动批准并重新计算 digest 的需求规范。
-        requirement = self._prepare_offline_requirement(
-            requirement_result,
+        # 冻结工件启用时，deterministic 与 semantic 必须从这里
+        # 取得同一份 RequirementSpec，禁止两组各自重新调用需求模型。
+        requirement = self._resolve_requirement(
+            context,
+            repository_vocabulary=set(repository_vocabulary),
         )
 
         if self._config.context_mode == "semantic":
@@ -227,8 +257,8 @@ class EvidenceGroundedImpactEvaluationAdapter:
                 model=self._model,
                 prebuilt_symbol_index=symbol_index,
                 prebuilt_dependency_graph=dependency_graph,
-                prebuilt_repository_vocabulary=(repository_vocabulary),
-                prebuilt_cochange_index=(context.cochange_index),
+                prebuilt_repository_vocabulary=repository_vocabulary,
+                prebuilt_cochange_index=context.cochange_index,
                 pool_limit=self._config.pool_limit,
             )
 
@@ -250,8 +280,8 @@ class EvidenceGroundedImpactEvaluationAdapter:
             )
 
             budget = Budget(
-                max_files=(requirement.scope_hints.max_files),
-                max_chars_per_file=(requirement.scope_hints.max_chars_per_file),
+                max_files=requirement.scope_hints.max_files,
+                max_chars_per_file=requirement.scope_hints.max_chars_per_file,
                 max_symbols_per_file=10,
             )
 
@@ -318,11 +348,11 @@ class EvidenceGroundedImpactEvaluationAdapter:
                 {
                     *(
                         normalize_digest_path(finding.path)
-                        for finding in (impact_result.branch_result.findings)
+                        for finding in impact_result.branch_result.findings
                     ),
                     *(
                         normalize_digest_path(change_point.path)
-                        for change_point in (impact_result.change_points)
+                        for change_point in impact_result.change_points
                     ),
                 }
             )
@@ -350,7 +380,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             candidate_pool_paths=pool_paths,
             selected_paths=selected_paths,
             reported_paths=reported_paths,
-            invalid_reported_paths=(invalid_reported_paths),
+            invalid_reported_paths=invalid_reported_paths,
             analyzed_item_count=coverage.analyzed,
             assigned_item_count=coverage.assigned,
             latency_ms=round(
@@ -360,7 +390,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             # 当前 LangChain 调用没有统一暴露 token usage，
             # 因此先显式记录 0，不能根据文本长度猜测。
             token_count=0,
-            candidate_score_traces=(candidate_score_traces),
+            candidate_score_traces=candidate_score_traces,
         )
 
 
@@ -368,10 +398,12 @@ def create_evidence_impact_adapter(
     *,
     model: BaseChatModel | None = None,
     config: EvidenceImpactAdapterConfig | None = None,
+    requirement_store: EvaluationRequirementStore | None = None,
 ) -> EvidenceGroundedImpactEvaluationAdapter:
     """创建可直接传给评测运行器的真实适配器。"""
 
     return EvidenceGroundedImpactEvaluationAdapter(
         model=model,
         config=config,
+        requirement_store=requirement_store,
     )
