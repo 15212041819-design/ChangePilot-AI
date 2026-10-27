@@ -1,4 +1,4 @@
-"""确定性候选召回与冻结上下文测试。"""
+"""确定性候选召回、全量评分轨迹与冻结上下文测试。"""
 
 import pytest
 
@@ -51,7 +51,7 @@ def _repository(
     files = [
         _file(
             "order_app/models.py",
-            "class Order:\n    pass\n",
+            ("class Order:\n    pass\n"),
         ),
         _file(
             "order_app/service.py",
@@ -109,6 +109,7 @@ def _repository(
 def _requirement(
     *,
     max_files: int = 12,
+    include: tuple[str, ...] = (),
 ) -> RequirementSpec:
     """创建指向 cancel_order 的需求契约。"""
 
@@ -136,6 +137,7 @@ def _requirement(
             ),
         ),
         scope_hints=ScopeHints(
+            include=include,
             max_files=max_files,
         ),
         source_text=("为订单系统增加取消订单功能。"),
@@ -195,7 +197,7 @@ def test_context_retrieval_uses_symbols_dependencies_and_test_mapping() -> None:
         commit="abc123",
     )
 
-    entries = {entry.path: entry for entry in result.candidate_pool.entries}
+    entries = {entry.path: entry for entry in (result.candidate_pool.entries)}
 
     assert "order_app/service.py" in entries
     assert "order_app/api.py" in entries
@@ -204,13 +206,15 @@ def test_context_retrieval_uses_symbols_dependencies_and_test_mapping() -> None:
     assert "README.md" not in entries
     assert "infra/audit.py" not in entries
 
-    service_signals = {signal.name for signal in entries["order_app/service.py"].signals}
+    service_signals = {signal.name for signal in (entries["order_app/service.py"].signals)}
 
-    test_signals = {signal.name for signal in entries["tests/test_service.py"].signals}
+    test_signals = {signal.name for signal in (entries["tests/test_service.py"].signals)}
 
     assert "symbol" in service_signals
     assert "testmap" in test_signals
+
     assert result.candidate_set.commit == "abc123"
+
     assert result.candidate_set.index_digest == result.index_digest
 
 
@@ -230,7 +234,9 @@ def test_context_digests_are_stable_when_snapshot_order_changes() -> None:
     )
 
     assert first.index_digest == second.index_digest
+
     assert first.candidate_pool.pool_digest == second.candidate_pool.pool_digest
+
     assert first.candidate_set.set_digest == second.candidate_set.set_digest
 
 
@@ -271,7 +277,7 @@ def test_freeze_rejects_path_outside_candidate_pool() -> None:
             _repository(),
             budget=Budget(),
             selected_paths=("missing.py",),
-            selected_by="semantic_map",
+            selected_by=("semantic_map"),
         )
 
 
@@ -280,10 +286,11 @@ def test_content_change_invalidates_index_and_candidate_set_digest() -> None:
 
     original = _repository()
     changed_files = list(original.files)
+
     service = changed_files[1]
 
     changed_files[1] = service.model_copy(
-        update={"content": (service.content + "\n" + "# changed repository evidence\n")}
+        update={"content": (service.content + "\n" + ("# changed repository evidence\n"))}
     )
 
     changed = original.model_copy(
@@ -305,6 +312,7 @@ def test_content_change_invalidates_index_and_candidate_set_digest() -> None:
     )
 
     assert first.index_digest != second.index_digest
+
     assert first.candidate_set.set_digest != second.candidate_set.set_digest
 
 
@@ -312,8 +320,11 @@ def test_file_kind_classification_is_deterministic() -> None:
     """文件类型必须由路径确定，不由 LLM 判断。"""
 
     assert classify_file_kind("tests/test_service.py") == "test"
+
     assert classify_file_kind("order_app/service.py") == "source"
+
     assert classify_file_kind("pyproject.toml") == "config"
+
     assert classify_file_kind("README.md") == "doc"
 
 
@@ -327,7 +338,7 @@ def test_context_retrieval_adds_low_weight_cochange_neighbor() -> None:
         cochange_index=(_cochange_index()),
     )
 
-    entries = {entry.path: entry for entry in result.candidate_pool.entries}
+    entries = {entry.path: entry for entry in (result.candidate_pool.entries)}
 
     audit = entries["infra/audit.py"]
 
@@ -353,3 +364,91 @@ def test_context_retrieval_rejects_mismatched_cochange_commit() -> None:
             commit="abc123",
             cochange_index=(_cochange_index(target_commit="def456")),
         )
+
+
+def test_retrieval_trace_explains_every_repository_file() -> None:
+    """全量轨迹必须解释选中、无信号和文档排除三种结果。"""
+
+    result = build_repository_context(
+        _requirement(),
+        _repository(),
+        commit="abc123",
+    )
+
+    traces = {trace.path: trace for trace in (result.retrieval_traces)}
+
+    assert set(traces) == {file.relative_path for file in _repository().files}
+
+    service_trace = traces["order_app/service.py"]
+
+    assert service_trace.outcome == "selected"
+
+    assert service_trace.full_rank is not None
+
+    assert service_trace.signals
+
+    audit_trace = traces["infra/audit.py"]
+
+    assert audit_trace.outcome == "no_signal"
+
+    assert audit_trace.full_rank is None
+
+    assert traces["README.md"].outcome == "document"
+
+
+def test_retrieval_trace_distinguishes_cutoff_and_scope_exclusion() -> None:
+    """排名截断与需求范围排除必须产生不同且可解释的轨迹。"""
+
+    cutoff_result = build_repository_context(
+        _requirement(),
+        _repository(),
+        commit="abc123",
+        pool_limit=1,
+    )
+
+    cutoff_traces = {trace.path: trace for trace in (cutoff_result.retrieval_traces)}
+
+    selected = [trace for trace in (cutoff_traces.values()) if trace.outcome == "selected"]
+
+    below_cutoff = [
+        trace for trace in (cutoff_traces.values()) if (trace.outcome == "below_cutoff")
+    ]
+
+    assert len(selected) == 1
+    assert selected[0].full_rank == 1
+    assert below_cutoff
+
+    assert all(trace.full_rank is not None for trace in below_cutoff)
+
+    scoped_result = build_repository_context(
+        _requirement(include=("order_app",)),
+        _repository(),
+        commit="abc123",
+    )
+
+    scoped_traces = {trace.path: trace for trace in (scoped_result.retrieval_traces)}
+
+    assert scoped_traces["tests/test_service.py"].outcome == "scope_excluded"
+
+    # 范围排除优先于文档分类。
+    assert scoped_traces["README.md"].outcome == "scope_excluded"
+
+
+def test_retrieval_trace_does_not_change_candidate_pool_digest() -> None:
+    """诊断字段不能进入候选池摘要或改变旧接口行为。"""
+
+    first = build_repository_context(
+        _requirement(),
+        _repository(),
+        commit="abc123",
+    )
+
+    second = build_repository_context(
+        _requirement(),
+        _repository(reverse=True),
+        commit="abc123",
+    )
+
+    assert first.candidate_pool == second.candidate_pool
+
+    assert first.retrieval_traces == second.retrieval_traces
