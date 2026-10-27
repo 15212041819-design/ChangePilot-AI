@@ -31,13 +31,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from langchain_core.language_models.chat_models import (
-    BaseChatModel,
-)
+from langchain_core.language_models.chat_models import BaseChatModel
 
-from app.tools.evaluation_dataset import (
-    build_evaluation_dataset,
-)
+from app.tools.evaluation_dataset import build_evaluation_dataset
 from app.tools.evaluation_requirements import (
     create_recording_requirement_store,
     load_requirement_artifact,
@@ -58,9 +54,7 @@ DEFAULT_EXPERIMENT_NAME = "new-retrieval-deterministic-impact"
 DEFAULT_OUTPUT_PATH = Path("evals/results/new-retrieval-deterministic-impact.json")
 
 
-def _default_experiment_name(
-    context_mode: str,
-) -> str:
+def _default_experiment_name(context_mode: str) -> str:
     """根据检索模式生成不会混淆基线和语义实验的默认名称。"""
 
     if context_mode == "semantic":
@@ -173,9 +167,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate_cli_values(
-    args: argparse.Namespace,
-) -> None:
+def _validate_cli_values(args: argparse.Namespace) -> None:
     """在调用 Git 或 LLM 前拒绝非法命令行配置。"""
 
     if args.samples <= 0:
@@ -219,7 +211,9 @@ def result_to_json_payload(
     """把实验结果转换为带版本号的 JSON 可序列化对象。"""
 
     return {
-        "schema_version": "1.0",
+        # 1.1 新增 semantic_query_count / semantic_tool_traces。
+        # 旧字段保持不变，离线诊断工具仍可读取 1.0 报告。
+        "schema_version": "1.1",
         "experiment_name": result.experiment_name,
         "dataset": asdict(result.dataset),
         "observations": [asdict(observation) for observation in result.observations],
@@ -248,9 +242,7 @@ def write_evaluation_result(
         exist_ok=True,
     )
 
-    payload = result_to_json_payload(
-        result,
-    )
+    payload = result_to_json_payload(result)
 
     rendered = json.dumps(
         payload,
@@ -314,16 +306,14 @@ def run_evaluation_cli(
         model=model,
         requirement_store=requirement_store,
         config=EvidenceImpactAdapterConfig(
-            max_repository_files=(args.max_repository_files),
-            max_file_size_bytes=(args.max_file_size_bytes),
+            max_repository_files=args.max_repository_files,
+            max_file_size_bytes=args.max_file_size_bytes,
             pool_limit=args.pool_limit,
             context_mode=args.context_mode,
         ),
     )
 
-    experiment_name = args.experiment_name or _default_experiment_name(
-        args.context_mode,
-    )
+    experiment_name = args.experiment_name or _default_experiment_name(args.context_mode)
 
     result = run_evaluation_experiment(
         repository_path,
@@ -384,9 +374,7 @@ def main(
     """命令行进程入口，返回可用于 CI 的退出码。"""
 
     try:
-        result, output_path = run_evaluation_cli(
-            argv,
-        )
+        result, output_path = run_evaluation_cli(argv)
 
     except EvaluationRunInvalidError as exc:
         print(

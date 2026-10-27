@@ -125,6 +125,11 @@ class SemanticMappingDecision(FrozenContractModel):
 class SemanticToolTrace(FrozenContractModel):
     """一次受控工具执行的审计记录。"""
 
+    query_index: int = Field(
+        ge=1,
+        description="本次 Semantic Mapping 中从 1 开始的全局查询序号。",
+    )
+
     round: int = Field(
         ge=1,
         le=3,
@@ -134,6 +139,50 @@ class SemanticToolTrace(FrozenContractModel):
 
     args_digest: str
 
+    terms: tuple[str, ...] = ()
+
+    symbol: str | None = None
+
+    module: str | None = None
+
+    reason: str = Field(
+        min_length=1,
+        max_length=300,
+    )
+
+    returned_paths: tuple[str, ...] = ()
+
     accepted_paths: tuple[str, ...] = ()
 
     rejected: tuple[str, ...] = ()
+
+    pool_size_before: int = Field(ge=0)
+
+    pool_size_after: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_trace(self) -> "SemanticToolTrace":
+        """确保查询参数、工具返回和候选池变化能够相互校验。"""
+
+        # 复用 SemanticQuery 的参数互斥规则，防止审计记录与真实查询脱节。
+        SemanticQuery(
+            tool=self.tool,
+            terms=self.terms,
+            symbol=self.symbol,
+            module=self.module,
+            reason=self.reason,
+        )
+
+        if len(self.returned_paths) != len(set(self.returned_paths)):
+            raise ValueError("returned_paths 不能包含重复路径。")
+
+        if len(self.accepted_paths) != len(set(self.accepted_paths)):
+            raise ValueError("accepted_paths 不能包含重复路径。")
+
+        if not set(self.accepted_paths).issubset(self.returned_paths):
+            raise ValueError("accepted_paths 必须来自 returned_paths。")
+
+        if self.pool_size_after != self.pool_size_before + len(self.accepted_paths):
+            raise ValueError("候选池大小变化必须等于实际接收的路径数量。")
+
+        return self

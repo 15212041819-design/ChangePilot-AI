@@ -194,7 +194,7 @@ def _semantic_decision() -> str:
                 "order_app/service.py",
             ],
             "queries": [],
-            "explanation": "根据 cancel_order 符号选择订单服务文件。",
+            "explanation": ("根据 cancel_order 符号选择订单服务文件。"),
         },
         ensure_ascii=False,
     )
@@ -241,7 +241,8 @@ def test_cli_runs_real_adapter_and_writes_versioned_json(
         )
     )
 
-    assert payload["schema_version"] == "1.0"
+    # 1.1 表示报告已经支持语义工具调用轨迹。
+    assert payload["schema_version"] == "1.1"
     assert payload["experiment_name"] == "integration-test"
 
     assert (
@@ -250,6 +251,7 @@ def test_cli_runs_real_adapter_and_writes_versioned_json(
     )
 
     assert payload["cochange_leak_reports"][0]["passed"] is True
+
     assert payload["metrics"]["file_recall_at_k"] == 1.0
 
 
@@ -312,7 +314,9 @@ def test_cli_runs_semantic_mode_with_independent_default_name(
     )
 
     assert written_path == output.resolve()
-    assert result.experiment_name == "semantic-retrieval-deterministic-impact"
+
+    assert result.experiment_name == ("semantic-retrieval-deterministic-impact")
+
     assert result.metrics.sample_count == 1
     assert result.metrics.failure_rate == 0.0
 
@@ -328,13 +332,22 @@ def test_cli_runs_semantic_mode_with_independent_default_name(
         "order_app/service.py",
     ]
 
+    # 模型没有申请工具时，报告必须明确记录零次查询，
+    # 而不是省略字段或写入 null。
+    assert payload["observations"][0]["semantic_query_count"] == 0
+
+    assert payload["observations"][0]["semantic_tool_traces"] == []
+
 
 def test_cli_records_then_replays_identical_requirement_specs(
     tmp_path: Path,
 ) -> None:
     """确定性组生成需求工件后，语义组不得再调用 Requirement Agent。"""
 
-    repository = _repository(tmp_path)
+    repository = _repository(
+        tmp_path,
+    )
+
     artifact = tmp_path / "fixtures" / "requirements.json"
 
     deterministic_result, _ = run_evaluation_cli(
@@ -371,7 +384,8 @@ def test_cli_records_then_replays_identical_requirement_specs(
             "--output",
             str(tmp_path / "semantic.json"),
         ),
-        # 只提供 Semantic Mapping 输出。如果还调用 Requirement Agent，
+        # 只提供 Semantic Mapping 输出。
+        # 如果还调用 Requirement Agent，
         # 它会立即因为结构不匹配而失败。
         model=FakeListChatModel(
             responses=[
@@ -381,6 +395,7 @@ def test_cli_records_then_replays_identical_requirement_specs(
     )
 
     assert semantic_result.metrics.failure_rate == 0.0
+
     assert semantic_result.observations[0].selected_paths == ("order_app/service.py",)
 
 
@@ -389,7 +404,10 @@ def test_cli_rejects_requirement_artifact_path_equal_to_report_path(
 ) -> None:
     """需求工件不得覆盖评测报告。"""
 
-    repository = _repository(tmp_path)
+    repository = _repository(
+        tmp_path,
+    )
+
     shared_path = tmp_path / "shared.json"
 
     with pytest.raises(
@@ -404,7 +422,9 @@ def test_cli_rejects_requirement_artifact_path_equal_to_report_path(
                 "--write-requirement-specs",
                 str(shared_path),
             ),
-            model=FakeListChatModel(responses=[]),
+            model=FakeListChatModel(
+                responses=[],
+            ),
         )
 
 

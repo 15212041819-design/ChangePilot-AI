@@ -19,16 +19,12 @@ from app.schemas.repository import (
     RepositoryFile,
     RepositorySnapshot,
 )
-from app.schemas.semantic_mapping import (
-    SemanticQuery,
-)
+from app.schemas.semantic_mapping import SemanticQuery
 from app.services.semantic_mapping_agent import (
     SemanticMappingValidationError,
     run_semantic_mapping,
 )
-from app.tools.context_builder import (
-    build_repository_context,
-)
+from app.tools.context_builder import build_repository_context
 
 ZERO_HASH = "sha256:" + "0" * 64
 
@@ -42,9 +38,7 @@ def _file(
     return RepositoryFile(
         relative_path=path,
         language="python",
-        size_bytes=len(
-            content.encode("utf-8"),
-        ),
+        size_bytes=len(content.encode("utf-8")),
         content=content,
     )
 
@@ -60,11 +54,9 @@ def _repository() -> RepositorySnapshot:
         _file(
             "order_app/api.py",
             (
-                "from order_app.service "
-                "import OrderService\n\n"
+                "from order_app.service import OrderService\n\n"
                 "def cancel_endpoint() -> None:\n"
-                "    OrderService()"
-                ".cancel_order()\n"
+                "    OrderService().cancel_order()\n"
             ),
         ),
         _file(
@@ -78,8 +70,7 @@ def _repository() -> RepositorySnapshot:
         _file(
             "tests/test_service.py",
             (
-                "from order_app.service "
-                "import OrderService\n\n"
+                "from order_app.service import OrderService\n\n"
                 "def test_cancel_order() -> None:\n"
                 "    assert OrderService()\n"
             ),
@@ -105,7 +96,7 @@ def _requirement() -> RequirementSpec:
         acceptance_criteria=(
             AcceptanceCriterion(
                 id="AC-001",
-                description=("用户可以取消订单。"),
+                description="用户可以取消订单。",
                 verification="test",
                 priority="P0",
             ),
@@ -121,7 +112,7 @@ def _requirement() -> RequirementSpec:
             ),
         ),
         scope_hints=ScopeHints(),
-        source_text=("为订单系统增加取消订单功能。"),
+        source_text="为订单系统增加取消订单功能。",
         spec_digest=ZERO_HASH,
     )
 
@@ -139,25 +130,17 @@ def _context():
 def _decision(
     *,
     needs_more_context: bool,
-    selected_paths: tuple[
-        str,
-        ...,
-    ] = (),
-    queries: tuple[
-        dict[str, object],
-        ...,
-    ] = (),
+    selected_paths: tuple[str, ...] = (),
+    queries: tuple[dict[str, object], ...] = (),
 ) -> str:
     """构造模型的结构化决策。"""
 
     return json.dumps(
         {
-            "needs_more_context": (needs_more_context),
-            "selected_paths": list(
-                selected_paths,
-            ),
+            "needs_more_context": needs_more_context,
+            "selected_paths": list(selected_paths),
             "queries": list(queries),
-            "explanation": ("根据候选符号和依赖证据选择。"),
+            "explanation": "根据候选符号和依赖证据选择。",
         },
         ensure_ascii=False,
     )
@@ -191,12 +174,12 @@ def test_agent_selects_only_existing_pool_paths() -> None:
     assert result.query_count == 0
     assert result.tool_traces == ()
 
-    assert tuple(item.path for item in (result.candidate_set.files)) == (
+    assert tuple(item.path for item in result.candidate_set.files) == (
         "order_app/service.py",
         "tests/test_service.py",
     )
 
-    assert all(item.selected_by == "semantic_map" for item in (result.candidate_set.files))
+    assert all(item.selected_by == "semantic_map" for item in result.candidate_set.files)
 
 
 def test_agent_expands_pool_through_whitelisted_tool() -> None:
@@ -204,7 +187,7 @@ def test_agent_expands_pool_through_whitelisted_tool() -> None:
 
     context = _context()
 
-    assert "support/ledger.py" not in {entry.path for entry in (context.candidate_pool.entries)}
+    assert "support/ledger.py" not in {entry.path for entry in context.candidate_pool.entries}
 
     model = FakeListChatModel(
         responses=[
@@ -212,10 +195,10 @@ def test_agent_expands_pool_through_whitelisted_tool() -> None:
                 needs_more_context=True,
                 queries=(
                     {
-                        "tool": ("list_module_symbols"),
+                        "tool": "list_module_symbols",
                         "terms": [],
                         "symbol": None,
-                        "module": ("support.ledger"),
+                        "module": "support.ledger",
                         "reason": ("需要确认候选池外但索引内的事件台账模块。"),
                     },
                 ),
@@ -243,11 +226,27 @@ def test_agent_expands_pool_through_whitelisted_tool() -> None:
     assert result.query_count == 1
     assert len(result.decisions) == 2
 
-    assert result.tool_traces[0].accepted_paths == ("support/ledger.py",)
+    trace = result.tool_traces[0]
 
-    assert "support/ledger.py" in {entry.path for entry in (result.candidate_pool.entries)}
+    # 验证模型发起的查询参数被完整记录。
+    assert trace.query_index == 1
+    assert trace.tool == "list_module_symbols"
+    assert trace.terms == ()
+    assert trace.symbol is None
+    assert trace.module == "support.ledger"
+    assert trace.reason
 
-    assert "support/ledger.py" in {item.path for item in (result.candidate_set.files)}
+    # returned_paths 表示工具真实返回的文件，
+    # accepted_paths 表示通过安全校验并写入候选池的文件。
+    assert trace.returned_paths == ("support/ledger.py",)
+    assert trace.accepted_paths == ("support/ledger.py",)
+
+    # 确认扩池前后的文件数变化能够被离线评测观察。
+    assert trace.pool_size_after == trace.pool_size_before + 1
+
+    assert "support/ledger.py" in {entry.path for entry in result.candidate_pool.entries}
+
+    assert "support/ledger.py" in {item.path for item in result.candidate_set.files}
 
 
 def test_agent_repairs_invalid_tool_arguments_once() -> None:
@@ -259,13 +258,11 @@ def test_agent_repairs_invalid_tool_arguments_once() -> None:
         needs_more_context=True,
         queries=(
             {
-                "tool": ("search_identifiers"),
-                "terms": [
-                    "cancel_order",
-                ],
+                "tool": "search_identifiers",
+                "terms": ["cancel_order"],
                 "symbol": "cancel_order",
                 "module": None,
-                "reason": ("查找取消订单符号。"),
+                "reason": "查找取消订单符号。",
             },
         ),
     )
@@ -276,9 +273,7 @@ def test_agent_repairs_invalid_tool_arguments_once() -> None:
         _repository(),
         context.symbol_index,
         context.dependency_graph,
-        budget=Budget(
-            max_files=1,
-        ),
+        budget=Budget(max_files=1),
         model=FakeListChatModel(
             responses=[
                 invalid_query,
@@ -293,7 +288,7 @@ def test_agent_repairs_invalid_tool_arguments_once() -> None:
     assert len(result.decisions) == 1
     assert result.query_count == 0
 
-    assert tuple(item.path for item in (result.candidate_set.files)) == ("order_app/service.py",)
+    assert tuple(item.path for item in result.candidate_set.files) == ("order_app/service.py",)
 
 
 def test_agent_repairs_over_budget_selection_once() -> None:
@@ -307,9 +302,7 @@ def test_agent_repairs_over_budget_selection_once() -> None:
         _repository(),
         context.symbol_index,
         context.dependency_graph,
-        budget=Budget(
-            max_files=1,
-        ),
+        budget=Budget(max_files=1),
         model=FakeListChatModel(
             responses=[
                 _decision(
@@ -329,7 +322,7 @@ def test_agent_repairs_over_budget_selection_once() -> None:
 
     assert len(result.decisions) == 1
 
-    assert tuple(item.path for item in (result.candidate_set.files)) == ("order_app/service.py",)
+    assert tuple(item.path for item in result.candidate_set.files) == ("order_app/service.py",)
 
 
 def test_agent_fails_when_over_budget_repair_is_still_invalid() -> None:
@@ -347,7 +340,7 @@ def test_agent_fails_when_over_budget_repair_is_still_invalid() -> None:
 
     with pytest.raises(
         SemanticMappingValidationError,
-        match=("修正一次后仍超过预算"),
+        match="修正一次后仍超过预算",
     ):
         run_semantic_mapping(
             _requirement(),
@@ -355,9 +348,7 @@ def test_agent_fails_when_over_budget_repair_is_still_invalid() -> None:
             _repository(),
             context.symbol_index,
             context.dependency_graph,
-            budget=Budget(
-                max_files=1,
-            ),
+            budget=Budget(max_files=1),
             model=FakeListChatModel(
                 responses=[
                     over_budget,
@@ -399,7 +390,7 @@ def test_unknown_identifier_query_cannot_add_fake_path() -> None:
 
     context = _context()
 
-    original_paths = {entry.path for entry in (context.candidate_pool.entries)}
+    original_paths = {entry.path for entry in context.candidate_pool.entries}
 
     result = run_semantic_mapping(
         _requirement(),
@@ -414,13 +405,11 @@ def test_unknown_identifier_query_cannot_add_fake_path() -> None:
                     needs_more_context=True,
                     queries=(
                         {
-                            "tool": ("search_identifiers"),
-                            "terms": [
-                                "imaginary_symbol",
-                            ],
+                            "tool": "search_identifiers",
+                            "terms": ["imaginary_symbol"],
                             "symbol": None,
                             "module": None,
-                            "reason": ("查找潜在符号。"),
+                            "reason": "查找潜在符号。",
                         },
                     ),
                 ),
@@ -432,9 +421,13 @@ def test_unknown_identifier_query_cannot_add_fake_path() -> None:
         ),
     )
 
-    assert {entry.path for entry in (result.candidate_pool.entries)} == original_paths
+    assert {entry.path for entry in result.candidate_pool.entries} == original_paths
 
     assert result.tool_traces[0].accepted_paths == ()
+
+    # 工具没有找到真实路径时，
+    # returned_paths 也必须为空，不能出现模型虚构的文件。
+    assert result.tool_traces[0].returned_paths == ()
 
 
 def test_agent_fails_when_round_budget_ends_without_final_selection() -> None:
@@ -446,13 +439,11 @@ def test_agent_fails_when_round_budget_ends_without_final_selection() -> None:
         needs_more_context=True,
         queries=(
             {
-                "tool": ("search_identifiers"),
-                "terms": [
-                    "missing_symbol",
-                ],
+                "tool": "search_identifiers",
+                "terms": ["missing_symbol"],
                 "symbol": None,
                 "module": None,
-                "reason": ("继续查找语义对应符号。"),
+                "reason": "继续查找语义对应符号。",
             },
         ),
     )
@@ -487,13 +478,11 @@ def test_agent_forces_final_selection_after_three_expansion_rounds() -> None:
         needs_more_context=True,
         queries=(
             {
-                "tool": ("search_identifiers"),
-                "terms": [
-                    "missing_symbol",
-                ],
+                "tool": "search_identifiers",
+                "terms": ["missing_symbol"],
                 "symbol": None,
                 "module": None,
-                "reason": ("继续查找语义对应符号。"),
+                "reason": "继续查找语义对应符号。",
             },
         ),
     )
@@ -504,9 +493,7 @@ def test_agent_forces_final_selection_after_three_expansion_rounds() -> None:
         _repository(),
         context.symbol_index,
         context.dependency_graph,
-        budget=Budget(
-            max_files=1,
-        ),
+        budget=Budget(max_files=1),
         model=FakeListChatModel(
             responses=[
                 expand,
@@ -523,7 +510,7 @@ def test_agent_forces_final_selection_after_three_expansion_rounds() -> None:
     assert result.query_count == 3
     assert len(result.decisions) == 4
 
-    assert tuple(item.path for item in (result.candidate_set.files)) == ("order_app/service.py",)
+    assert tuple(item.path for item in result.candidate_set.files) == ("order_app/service.py",)
 
 
 def test_query_contract_rejects_wrong_arguments() -> None:

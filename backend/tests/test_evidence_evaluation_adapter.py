@@ -17,17 +17,13 @@ from app.tools.evaluation_requirements import (
     load_requirement_artifact,
     write_requirement_artifact,
 )
-from app.tools.evaluation_runner import (
-    EvaluationCaseContext,
-)
+from app.tools.evaluation_runner import EvaluationCaseContext
 from app.tools.evidence_evaluation_adapter import (
     EvidenceGroundedImpactEvaluationAdapter,
     EvidenceImpactAdapterConfig,
     create_evidence_impact_adapter,
 )
-from app.tools.git_cochange import (
-    CoChangeIndex,
-)
+from app.tools.git_cochange import CoChangeIndex
 
 ZERO_HISTORY_DIGEST = "sha256:" + "0" * 64
 
@@ -83,7 +79,29 @@ def _semantic_decision(
             "needs_more_context": False,
             "selected_paths": list(selected_paths),
             "queries": [],
-            "explanation": "根据需求实体、符号和依赖证据选择目标文件。",
+            "explanation": ("根据需求实体、符号和依赖证据选择目标文件。"),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _semantic_query_decision() -> str:
+    """返回一次可审计的受控标识符查询。"""
+
+    return json.dumps(
+        {
+            "needs_more_context": True,
+            "selected_paths": [],
+            "queries": [
+                {
+                    "tool": "search_identifiers",
+                    "terms": ["cancel_order"],
+                    "symbol": None,
+                    "module": None,
+                    "reason": ("确认取消订单符号对应的真实仓库文件。"),
+                }
+            ],
+            "explanation": "先通过白名单工具核对真实符号。",
         },
         ensure_ascii=False,
     )
@@ -125,7 +143,7 @@ def _context(
     sample = EvaluationSample(
         sample_id="git-bbbbbbbbbbbb",
         repository_relative_path="",
-        request_text="为订单系统实现所属用户取消待支付订单功能",
+        request_text=("为订单系统实现所属用户取消待支付订单功能"),
         analysis_commit=commit,
         answer_commit="b" * 40,
         changed_files=(
@@ -182,7 +200,9 @@ def test_adapter_runs_real_retrieval_guard_and_impact_engine(
     assert observation.reported_paths == ("order_app/service.py",)
     assert observation.invalid_reported_paths == ()
     assert observation.analyzed_item_count >= 1
+
     assert observation.assigned_item_count >= observation.analyzed_item_count
+
     assert observation.latency_ms >= 0
 
     # 评分轨迹必须完整对应候选池顺序。
@@ -281,9 +301,13 @@ def test_adapter_runs_semantic_context_mode_without_changing_impact_engine(
     )
 
     assert observation.status == "success"
+
     assert "order_app/service.py" in observation.candidate_pool_paths
+
     assert observation.selected_paths == ("order_app/service.py",)
+
     assert observation.reported_paths == ("order_app/service.py",)
+
     assert observation.invalid_reported_paths == ()
 
     # 语义重排不能破坏候选池评分证据。
@@ -291,6 +315,63 @@ def test_adapter_runs_semantic_context_mode_without_changing_impact_engine(
         tuple(trace.path for trace in observation.candidate_score_traces)
         == observation.candidate_pool_paths
     )
+
+    # 没有申请工具时，查询次数和轨迹都应为空。
+    assert observation.semantic_query_count == 0
+    assert observation.semantic_tool_traces == ()
+
+
+def test_semantic_adapter_records_complete_tool_trace(
+    tmp_path: Path,
+) -> None:
+    """语义查询必须把参数、返回路径和扩池结果写入 Observation。"""
+
+    adapter = create_evidence_impact_adapter(
+        model=FakeListChatModel(
+            responses=[
+                _model_response_with_assumption(),
+                _semantic_query_decision(),
+                _semantic_decision(
+                    "order_app/service.py",
+                ),
+            ]
+        ),
+        config=EvidenceImpactAdapterConfig(
+            context_mode="semantic",
+        ),
+    )
+
+    observation = adapter(
+        _context(tmp_path),
+    )
+
+    assert observation.status == "success"
+    assert observation.semantic_query_count == 1
+
+    trace = observation.semantic_tool_traces[0]
+
+    # 查询编号、轮次和工具名称必须被保留。
+    assert trace.query_index == 1
+    assert trace.round == 1
+    assert trace.tool == "search_identifiers"
+
+    # 工具参数必须与模型发起的请求一致。
+    assert trace.terms == ("cancel_order",)
+    assert trace.symbol is None
+    assert trace.module is None
+
+    assert trace.reason == ("确认取消订单符号对应的真实仓库文件。")
+
+    # 工具确实在真实索引中找到了服务文件。
+    assert "order_app/service.py" in trace.returned_paths
+
+    # 该文件已经在候选池中，所以不能重复写入。
+    assert trace.accepted_paths == ()
+
+    assert any(item.startswith("DUPLICATE_PATH:") for item in trace.rejected)
+
+    # 重复结果没有改变候选池大小。
+    assert trace.pool_size_before == trace.pool_size_after
 
 
 def test_semantic_adapter_replays_recorded_requirement_without_second_requirement_call(
@@ -313,7 +394,9 @@ def test_semantic_adapter_replays_recorded_requirement_without_second_requiremen
         rejected_pure_test_count=0,
     )
 
-    store = create_recording_requirement_store(dataset)
+    store = create_recording_requirement_store(
+        dataset,
+    )
 
     deterministic = create_evidence_impact_adapter(
         model=FakeListChatModel(
@@ -342,7 +425,9 @@ def test_semantic_adapter_replays_recorded_requirement_without_second_requiremen
     semantic = create_evidence_impact_adapter(
         model=FakeListChatModel(
             responses=[
-                _semantic_decision("order_app/service.py"),
+                _semantic_decision(
+                    "order_app/service.py",
+                ),
             ]
         ),
         config=EvidenceImpactAdapterConfig(
@@ -354,6 +439,7 @@ def test_semantic_adapter_replays_recorded_requirement_without_second_requiremen
     observation = semantic(context)
 
     assert observation.status == "success"
+
     assert observation.selected_paths == ("order_app/service.py",)
 
 

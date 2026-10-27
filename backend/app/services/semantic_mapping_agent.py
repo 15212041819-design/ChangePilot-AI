@@ -159,7 +159,7 @@ def _search_identifiers(
                 indexed_file.module_name,
                 *(
                     value
-                    for symbol in (indexed_file.symbols)
+                    for symbol in indexed_file.symbols
                     for value in (
                         symbol.name,
                         symbol.qualified_name,
@@ -179,7 +179,7 @@ def _search_identifiers(
                 path=indexed_file.file_path,
                 symbols=tuple(
                     symbol.qualified_name
-                    for symbol in (indexed_file.symbols)
+                    for symbol in indexed_file.symbols
                     if any(
                         term
                         in (
@@ -271,7 +271,7 @@ def _list_module_symbols(
     return tuple(
         _candidate_from_indexed_file(
             path=indexed_file.file_path,
-            symbols=tuple(symbol.qualified_name for symbol in (indexed_file.symbols)),
+            symbols=tuple(symbol.qualified_name for symbol in indexed_file.symbols),
             signal_name="symbol",
             signal_value=2.0,
         )
@@ -279,7 +279,7 @@ def _list_module_symbols(
             symbol_index.files,
             key=lambda item: item.file_path,
         )
-        if (indexed_file.module_name.casefold() == requested)
+        if indexed_file.module_name.casefold() == requested
     )[:MAX_TOOL_RESULTS]
 
 
@@ -306,7 +306,7 @@ def _expand_callers(
         ): tuple(
             symbol.qualified_name
             for file_item, symbol in matches
-            if (file_item.file_path == indexed_file.file_path)
+            if file_item.file_path == indexed_file.file_path
         )
         for indexed_file, _ in matches
     }
@@ -399,24 +399,26 @@ def _prompt_payload(
 
     payload = {
         "requirement": {
-            "summary": (requirement.summary),
-            "change_type": (requirement.change_type),
+            "summary": requirement.summary,
+            "change_type": requirement.change_type,
             "acceptance_criteria": [
                 {
                     "id": item.id,
-                    "description": (item.description),
-                    "priority": (item.priority),
+                    "description": item.description,
+                    "priority": item.priority,
                 }
-                for item in (requirement.acceptance_criteria)
+                for item in requirement.acceptance_criteria
                 if item.status == "active"
             ],
             "entity_hints": [
                 item.model_dump(
                     mode="json",
                 )
-                for item in (requirement.entity_hints)
+                for item in requirement.entity_hints
             ],
-            "constraints": list(requirement.constraints),
+            "constraints": list(
+                requirement.constraints,
+            ),
         },
         "candidate_pool": [
             {
@@ -427,9 +429,9 @@ def _prompt_payload(
                     signal.model_dump(
                         mode="json",
                     )
-                    for signal in (entry.signals)
+                    for signal in entry.signals
                 ],
-                "pre_score": (entry.pre_score),
+                "pre_score": entry.pre_score,
                 "source": entry.source,
             }
             for entry in pool.entries
@@ -445,10 +447,10 @@ def _prompt_payload(
             "queries": (MAX_EXPANSION_QUERIES - len(pool.expansion_records)),
         },
         "selection_budget": {
-            "max_selected_files": (budget.max_files),
+            "max_selected_files": budget.max_files,
         },
-        "repair_feedback": (repair_feedback),
-        "force_finalize": (force_finalize),
+        "repair_feedback": repair_feedback,
+        "force_finalize": force_finalize,
     }
 
     return json.dumps(
@@ -474,7 +476,7 @@ def _invoke_mapping_model(
     """调用一轮结构化 Semantic Mapping 决策。"""
 
     parser = PydanticOutputParser(
-        pydantic_object=(SemanticMappingDecision),
+        pydantic_object=SemanticMappingDecision,
     )
 
     prompt = ChatPromptTemplate.from_messages(
@@ -485,7 +487,7 @@ def _invoke_mapping_model(
             ),
             (
                 "human",
-                ("请分析以下需求、候选池和工具历史：\n\n{payload}"),
+                "请分析以下需求、候选池和工具历史：\n\n{payload}",
             ),
         ]
     )
@@ -499,8 +501,8 @@ def _invoke_mapping_model(
                 pool,
                 traces,
                 budget=budget,
-                repair_feedback=(repair_feedback),
-                force_finalize=(force_finalize),
+                repair_feedback=repair_feedback,
+                force_finalize=force_finalize,
             ),
             "format_instructions": (parser.get_format_instructions()),
         }
@@ -578,8 +580,8 @@ def _invoke_mapping_model_with_repair(
                 pool=pool,
                 traces=traces,
                 budget=budget,
-                repair_feedback=(repair_feedback),
-                force_finalize=(force_finalize),
+                repair_feedback=repair_feedback,
+                force_finalize=force_finalize,
                 model=model,
             )
 
@@ -590,8 +592,7 @@ def _invoke_mapping_model_with_repair(
                 ) from exc
 
             # 只返回契约错误，不自动修改模型输出。
-            # 限制异常文本长度，避免把异常堆栈
-            # 无限放大到下一轮提示。
+            # 限制异常文本长度，避免把异常堆栈无限放大到下一轮提示。
             repair_feedback = (
                 "上一轮输出未通过 "
                 "SemanticMappingDecision 契约。"
@@ -604,7 +605,7 @@ def _invoke_mapping_model_with_repair(
 
         decision_error = _forced_finalization_error(
             decision,
-            force_finalize=(force_finalize),
+            force_finalize=force_finalize,
         ) or _selection_budget_error(
             decision,
             budget,
@@ -653,13 +654,10 @@ def run_semantic_mapping(
         raise SemanticMappingValidationError("仓库快照与依赖图不匹配。")
 
     selected_model = model or get_chat_model()
-
     current_pool = pool
 
     decisions: list[SemanticMappingDecision] = []
-
     traces: list[SemanticToolTrace] = []
-
     query_count = 0
 
     known_paths = _known_repository_paths(
@@ -687,8 +685,8 @@ def run_semantic_mapping(
             final_decision = decision
             break
 
-        # 扩池轮次基于 CandidatePool 已消耗的轮数
-        # 继续累计，防止重复调用时重新从第一轮开始。
+        # 扩池轮次基于 CandidatePool 已消耗的轮数继续累计，
+        # 防止重复调用时重新从第一轮开始。
         expansion_round = current_pool.expansion_rounds_used + 1
 
         if expansion_round > MAX_EXPANSION_ROUNDS:
@@ -709,11 +707,24 @@ def run_semantic_mapping(
             candidates = execute_semantic_query(
                 query,
                 symbol_index=symbol_index,
-                dependency_graph=(dependency_graph),
+                dependency_graph=dependency_graph,
             )
 
-            # reason 是解释性文本，
-            # 不进入稳定的工具参数摘要。
+            # 查询结果先按工具的稳定顺序记录。
+            # 即使路径已经存在于候选池、最终被扩池器以
+            # DUPLICATE_PATH 拒绝，也不能丢掉“工具找到过”的事实。
+            returned_paths = tuple(
+                normalize_digest_path(
+                    candidate.path,
+                )
+                for candidate in candidates
+            )
+
+            pool_size_before = len(
+                current_pool.entries,
+            )
+
+            # reason 是解释性文本，不进入稳定的工具参数摘要。
             args_digest = canonical_digest(
                 "semantic_query",
                 query.model_dump(
@@ -739,18 +750,27 @@ def run_semantic_mapping(
 
             traces.append(
                 SemanticToolTrace(
+                    query_index=query_count,
                     round=expansion_round,
                     tool=query.tool,
                     args_digest=args_digest,
-                    accepted_paths=(outcome.accepted_paths),
-                    rejected=(outcome.rejected),
+                    terms=query.terms,
+                    symbol=query.symbol,
+                    module=query.module,
+                    reason=query.reason,
+                    returned_paths=returned_paths,
+                    accepted_paths=outcome.accepted_paths,
+                    rejected=outcome.rejected,
+                    pool_size_before=pool_size_before,
+                    pool_size_after=len(
+                        current_pool.entries,
+                    ),
                 )
             )
 
     if final_decision is None:
         # 三轮扩池用尽后，不由代码擅自选择文件。
         # 给模型一次只允许最终选择的强制收敛轮。
-        # 该调用不能执行新工具，也不会扩大查询预算。
         final_decision = _invoke_mapping_model_with_repair(
             requirement=requirement,
             pool=current_pool,
@@ -765,7 +785,7 @@ def run_semantic_mapping(
         )
 
     normalized_selected = tuple(
-        normalize_digest_path(path) for path in (final_decision.selected_paths)
+        normalize_digest_path(path) for path in final_decision.selected_paths
     )
 
     if current_pool.entries and not normalized_selected:
@@ -793,7 +813,7 @@ def run_semantic_mapping(
             repository,
             budget=budget,
             set_id=set_id,
-            selected_paths=(normalized_selected),
+            selected_paths=normalized_selected,
             selected_by="semantic_map",
         )
 

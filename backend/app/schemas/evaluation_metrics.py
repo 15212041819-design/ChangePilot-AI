@@ -39,6 +39,12 @@ CandidateRerankLane = Literal[
     "source",
     "test",
 ]
+SemanticToolName = Literal[
+    "search_identifiers",
+    "expand_callers",
+    "read_signature",
+    "list_module_symbols",
+]
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,46 @@ class CandidateRerankTrace:
             raise ValueError("未选中候选的 rerank_rank 必须为 None。")
 
 
+@dataclass(frozen=True)
+class SemanticToolExecutionTrace:
+    """语义映射中一次白名单工具调用的可序列化评测轨迹。"""
+
+    query_index: int
+    round: int
+    tool: SemanticToolName
+    args_digest: str
+    terms: tuple[str, ...]
+    symbol: str | None
+    module: str | None
+    reason: str
+    returned_paths: tuple[str, ...]
+    accepted_paths: tuple[str, ...]
+    rejected: tuple[str, ...]
+    pool_size_before: int
+    pool_size_after: int
+
+    def __post_init__(self) -> None:
+        """验证工具轨迹可用于复盘，而不是一组互相矛盾的日志。"""
+
+        if self.query_index <= 0 or self.round <= 0:
+            raise ValueError("语义查询序号和轮次必须大于 0。")
+
+        if not self.args_digest.strip() or not self.reason.strip():
+            raise ValueError("语义工具轨迹必须包含参数摘要和查询原因。")
+
+        _validate_unique_paths("returned_paths", self.returned_paths)
+        _validate_unique_paths("accepted_paths", self.accepted_paths)
+
+        if not set(self.accepted_paths).issubset(self.returned_paths):
+            raise ValueError("语义工具 accepted_paths 必须来自 returned_paths。")
+
+        if self.pool_size_before < 0 or self.pool_size_after < 0:
+            raise ValueError("语义工具候选池大小不能为负数。")
+
+        if self.pool_size_after != self.pool_size_before + len(self.accepted_paths):
+            raise ValueError("语义工具候选池变化与 accepted_paths 数量不一致。")
+
+
 def _validate_unique_paths(
     field_name: str,
     paths: tuple[str, ...],
@@ -223,6 +269,15 @@ class EvaluationObservation:
         ...,
     ] = ()
 
+    # 仅 semantic 模式可能产生。显式保存 0/空元组，能区分
+    # “模型没有调用工具”和“评测器忘记记录工具调用”。
+    semantic_query_count: int = 0
+
+    semantic_tool_traces: tuple[
+        SemanticToolExecutionTrace,
+        ...,
+    ] = ()
+
     def __post_init__(self) -> None:
         """阻止重复路径、伪造覆盖率和矛盾状态进入评测。"""
 
@@ -269,6 +324,29 @@ class EvaluationObservation:
 
         if self.token_count < 0:
             raise ValueError("token_count 不能为负数。")
+
+        if self.semantic_query_count < 0:
+            raise ValueError("semantic_query_count 不能为负数。")
+
+        if self.semantic_query_count != len(self.semantic_tool_traces):
+            raise ValueError("semantic_query_count 必须等于 semantic_tool_traces 数量。")
+
+        if self.semantic_tool_traces:
+            query_indexes = tuple(trace.query_index for trace in self.semantic_tool_traces)
+
+            if query_indexes != tuple(range(1, self.semantic_query_count + 1)):
+                raise ValueError("语义工具 query_index 必须从 1 连续递增。")
+
+            for previous, current in zip(
+                self.semantic_tool_traces,
+                self.semantic_tool_traces[1:],
+                strict=False,
+            ):
+                if current.round < previous.round:
+                    raise ValueError("语义工具调用轮次不能倒退。")
+
+                if current.pool_size_before != previous.pool_size_after:
+                    raise ValueError("相邻语义工具轨迹的候选池大小必须连续。")
 
         if self.status == "failed" and not (self.error or "").strip():
             raise ValueError("failed 运行必须提供 error。")
@@ -337,7 +415,12 @@ class EvaluationObservation:
                 raise ValueError("重排轨迹的选中文件必须等于 selected_paths。")
 
             rerank_ranks = tuple(sorted(trace.rerank_rank for trace in selected_traces))
-            expected_rerank_ranks = tuple(range(1, len(selected_traces) + 1))
+            expected_rerank_ranks = tuple(
+                range(
+                    1,
+                    len(selected_traces) + 1,
+                )
+            )
 
             if rerank_ranks != expected_rerank_ranks:
                 raise ValueError("选中轨迹的 rerank_rank 必须从 1 连续递增。")

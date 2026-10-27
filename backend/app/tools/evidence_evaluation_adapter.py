@@ -37,6 +37,7 @@ from app.schemas.evaluation_metrics import (
     CandidateSignalTrace,
     EvaluationObservation,
     RepositoryFileRetrievalTrace,
+    SemanticToolExecutionTrace,
 )
 from app.schemas.guard import GuardDigests
 from app.services.requirement_spec_agent import (
@@ -46,7 +47,9 @@ from app.services.requirement_spec_agent import (
 from app.services.semantic_context import (
     build_semantic_context,
 )
-from app.tools.candidate_reranker import rerank_candidate_pool
+from app.tools.candidate_reranker import (
+    rerank_candidate_pool,
+)
 from app.tools.context_builder import (
     DEFAULT_POOL_LIMIT,
     build_repository_vocabulary,
@@ -182,7 +185,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
         def generate() -> RequirementSpec:
             result = analyze_requirement_spec(
                 context.sample.request_text,
-                repository_vocabulary=repository_vocabulary,
+                repository_vocabulary=(repository_vocabulary),
                 model=self._model,
             )
 
@@ -208,8 +211,8 @@ class EvidenceGroundedImpactEvaluationAdapter:
 
         repository = scan_repository(
             context.snapshot_path,
-            max_files=self._config.max_repository_files,
-            max_file_size_bytes=self._config.max_file_size_bytes,
+            max_files=(self._config.max_repository_files),
+            max_file_size_bytes=(self._config.max_file_size_bytes),
         )
 
         if not repository.files:
@@ -244,8 +247,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             repository_vocabulary=set(repository_vocabulary),
         )
 
-        # 无论后面使用 deterministic 还是 semantic 模式，都先执行同一份
-        # 基础检索并保存全量文件轨迹。这些轨迹是定位 pool_recall 瓶颈的事实来源。
+        # 两种模式先执行同一份基础检索并保存全量文件轨迹。
         baseline_retrieval = retrieve_candidate_pool_with_traces(
             requirement,
             repository,
@@ -253,35 +255,63 @@ class EvidenceGroundedImpactEvaluationAdapter:
             dependency_graph,
             commit=context.snapshot_commit,
             index_digest=index_digest,
-            cochange_index=context.cochange_index,
+            cochange_index=(context.cochange_index),
             pool_limit=self._config.pool_limit,
         )
 
-        candidate_rerank_traces: tuple[CandidateRerankTrace, ...] = ()
+        candidate_rerank_traces: tuple[
+            CandidateRerankTrace,
+            ...,
+        ] = ()
+
+        semantic_query_count = 0
+
+        semantic_tool_traces: tuple[
+            SemanticToolExecutionTrace,
+            ...,
+        ] = ()
 
         if self._config.context_mode == "semantic":
-            # 语义模式运行：
+            # 语义模式：
             #
             # deterministic retrieval
             #     → bounded semantic mapping
             #     → context freeze
-            #
-            # 同时复用上面已经建立的索引、依赖图和词表，
-            # 避免重复扫描、重复解析仓库。
             semantic_context = build_semantic_context(
                 requirement,
                 repository,
                 commit=context.snapshot_commit,
                 model=self._model,
-                prebuilt_symbol_index=symbol_index,
-                prebuilt_dependency_graph=dependency_graph,
-                prebuilt_repository_vocabulary=repository_vocabulary,
-                prebuilt_cochange_index=context.cochange_index,
+                prebuilt_symbol_index=(symbol_index),
+                prebuilt_dependency_graph=(dependency_graph),
+                prebuilt_repository_vocabulary=(repository_vocabulary),
+                prebuilt_cochange_index=(context.cochange_index),
                 pool_limit=self._config.pool_limit,
             )
 
             candidate_pool = semantic_context.candidate_pool
             candidate_set = semantic_context.candidate_set
+
+            semantic_query_count = semantic_context.query_count
+
+            semantic_tool_traces = tuple(
+                SemanticToolExecutionTrace(
+                    query_index=trace.query_index,
+                    round=trace.round,
+                    tool=trace.tool,
+                    args_digest=trace.args_digest,
+                    terms=trace.terms,
+                    symbol=trace.symbol,
+                    module=trace.module,
+                    reason=trace.reason,
+                    returned_paths=(trace.returned_paths),
+                    accepted_paths=(trace.accepted_paths),
+                    rejected=trace.rejected,
+                    pool_size_before=(trace.pool_size_before),
+                    pool_size_after=(trace.pool_size_after),
+                )
+                for trace in semantic_context.tool_traces
+            )
 
         else:
             # 确定性模式保留原来的行为，
@@ -289,8 +319,8 @@ class EvidenceGroundedImpactEvaluationAdapter:
             candidate_pool = baseline_retrieval.candidate_pool
 
             budget = Budget(
-                max_files=requirement.scope_hints.max_files,
-                max_chars_per_file=requirement.scope_hints.max_chars_per_file,
+                max_files=(requirement.scope_hints.max_files),
+                max_chars_per_file=(requirement.scope_hints.max_chars_per_file),
                 max_symbols_per_file=10,
             )
 
@@ -303,15 +333,15 @@ class EvidenceGroundedImpactEvaluationAdapter:
                 candidate_pool,
                 repository,
                 budget=budget,
-                selected_paths=rerank_result.selected_paths,
+                selected_paths=(rerank_result.selected_paths),
                 selected_by="baseline",
             )
 
             candidate_rerank_traces = tuple(
                 CandidateRerankTrace(
                     path=trace.path,
-                    original_rank=trace.original_rank,
-                    rerank_rank=trace.rerank_rank,
+                    original_rank=(trace.original_rank),
+                    rerank_rank=(trace.rerank_rank),
                     pre_score=trace.pre_score,
                     lane=trace.lane,
                     selected=trace.selected,
@@ -323,9 +353,9 @@ class EvidenceGroundedImpactEvaluationAdapter:
             raise ValueError(f"{self._config.context_mode} 模式没有生成可冻结的 CandidateSet。")
 
         digests = GuardDigests(
-            set_digest=candidate_set.set_digest,
-            spec_digest=candidate_set.spec_digest,
-            index_digest=candidate_set.index_digest,
+            set_digest=(candidate_set.set_digest),
+            spec_digest=(candidate_set.spec_digest),
+            index_digest=(candidate_set.index_digest),
         )
 
         resources: dict[str, object] = {
@@ -333,7 +363,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
             "repository_snapshot": repository,
             "symbol_index": symbol_index,
             "dependency_graph": dependency_graph,
-            "cochange_index": context.cochange_index,
+            "cochange_index": (context.cochange_index),
         }
 
         # 两种模式都运行相同的确定性 Impact Engine，
@@ -347,8 +377,6 @@ class EvidenceGroundedImpactEvaluationAdapter:
         pool_paths = tuple(entry.path for entry in candidate_pool.entries)
 
         # 直接保存检索器计算出的评分证据。
-        # 不在评测层重新计算分数，避免诊断逻辑
-        # 与真实排序逻辑形成两套实现。
         candidate_score_traces = tuple(
             CandidateScoreTrace(
                 path=entry.path,
@@ -393,7 +421,7 @@ class EvidenceGroundedImpactEvaluationAdapter:
                 {
                     *(
                         normalize_digest_path(finding.path)
-                        for finding in impact_result.branch_result.findings
+                        for finding in (impact_result.branch_result.findings)
                     ),
                     *(
                         normalize_digest_path(change_point.path)
@@ -420,14 +448,14 @@ class EvidenceGroundedImpactEvaluationAdapter:
         )
 
         return EvaluationObservation(
-            sample_id=context.sample.sample_id,
-            status=impact_result.branch_result.status,
+            sample_id=(context.sample.sample_id),
+            status=(impact_result.branch_result.status),
             candidate_pool_paths=pool_paths,
             selected_paths=selected_paths,
             reported_paths=reported_paths,
-            invalid_reported_paths=invalid_reported_paths,
-            analyzed_item_count=coverage.analyzed,
-            assigned_item_count=coverage.assigned,
+            invalid_reported_paths=(invalid_reported_paths),
+            analyzed_item_count=(coverage.analyzed),
+            assigned_item_count=(coverage.assigned),
             latency_ms=round(
                 elapsed_ms,
                 3,
@@ -435,9 +463,11 @@ class EvidenceGroundedImpactEvaluationAdapter:
             # 当前 LangChain 调用没有统一暴露 token usage，
             # 因此先显式记录 0，不能根据文本长度猜测。
             token_count=0,
-            candidate_score_traces=candidate_score_traces,
-            baseline_retrieval_traces=baseline_retrieval_traces,
-            candidate_rerank_traces=candidate_rerank_traces,
+            candidate_score_traces=(candidate_score_traces),
+            baseline_retrieval_traces=(baseline_retrieval_traces),
+            candidate_rerank_traces=(candidate_rerank_traces),
+            semantic_query_count=(semantic_query_count),
+            semantic_tool_traces=(semantic_tool_traces),
         )
 
 
