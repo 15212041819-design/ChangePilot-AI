@@ -1,13 +1,24 @@
 """Evidence-grounded 正式分析 API 的 HTTP 入口。"""
 
 from typing import Annotated
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
+from app.db.session import get_database_session
+from app.repositories.analysis_context import (
+    AnalysisContextConflictError,
+    AnalysisContextPersistenceError,
+    SQLAlchemyAnalysisContextRepository,
+)
+from app.schemas.analysis_context import StoredAnalysisContext
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
     EvidenceAnalysisResponse,
+)
+from app.services.analysis_lifecycle import (
+    EvidenceAnalysisLifecycleService,
+    PersistedEvidenceAnalysisReviewRequiredError,
 )
 from app.services.evidence_analysis import (
     EvidenceAnalysisExecutor,
@@ -17,6 +28,24 @@ from app.services.evidence_analysis import (
 )
 
 router = APIRouter(tags=["Analysis"])
+
+
+def get_analysis_lifecycle_service(
+    executor: Annotated[
+        EvidenceAnalysisExecutor,
+        Depends(get_evidence_analysis_executor),
+    ],
+    session: Annotated[
+        Session,
+        Depends(get_database_session),
+    ],
+) -> EvidenceAnalysisLifecycleService:
+    """为一次 HTTP 请求装配执行器、Session 与生命周期服务。"""
+
+    return EvidenceAnalysisLifecycleService(
+        executor=executor,
+        repository=SQLAlchemyAnalysisContextRepository(session),
+    )
 
 
 def _normalize_request(
@@ -57,24 +86,45 @@ def _normalize_request(
 
 def _execute_analysis(
     request: EvidenceAnalysisRequest,
-    executor: EvidenceAnalysisExecutor,
+    lifecycle: EvidenceAnalysisLifecycleService,
 ) -> EvidenceAnalysisResponse:
     """执行统一错误映射，并构造冻结后的成功响应。"""
 
     normalized_request = _normalize_request(request)
 
     try:
-        report = executor.analyze(normalized_request)
+        execution = lifecycle.execute(normalized_request)
+
+    except PersistedEvidenceAnalysisReviewRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "thread_id": exc.thread_id,
+                "workflow_status": "awaiting_requirement_review",
+                "message": str(exc),
+            },
+        ) from exc
 
     except EvidenceAnalysisReviewRequiredError as exc:
-        # 第 3 步接入 PostgreSQL 后，这个状态会被保存并允许恢复。
-        # 当前同步接口先使用 409 明确表示需要人工介入。
+        # 兼容尚未经过生命周期服务持久化的旧执行器。
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 
     except EvidenceAnalysisUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    except AnalysisContextConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except AnalysisContextPersistenceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
@@ -94,10 +144,10 @@ def _execute_analysis(
         ) from exc
 
     return EvidenceAnalysisResponse(
-        thread_id=uuid4().hex,
+        thread_id=execution.thread_id,
         workflow_status="completed",
-        status=report.overview.status,
-        report=report,
+        status=execution.report.overview.status,
+        report=execution.report,
     )
 
 
@@ -108,14 +158,39 @@ def _execute_analysis(
 )
 def create_evidence_analysis(
     request: EvidenceAnalysisRequest,
-    executor: Annotated[
-        EvidenceAnalysisExecutor,
-        Depends(get_evidence_analysis_executor),
+    lifecycle: Annotated[
+        EvidenceAnalysisLifecycleService,
+        Depends(get_analysis_lifecycle_service),
     ],
 ) -> EvidenceAnalysisResponse:
     """正式产品入口；前端和后续持久化层只依赖这个路径。"""
 
-    return _execute_analysis(request, executor)
+    return _execute_analysis(request, lifecycle)
+
+
+@router.get(
+    "/analyses/{thread_id}",
+    response_model=StoredAnalysisContext,
+    summary="查询已持久化的软件变更分析上下文",
+)
+def get_evidence_analysis_context(
+    thread_id: str,
+    lifecycle: Annotated[
+        EvidenceAnalysisLifecycleService,
+        Depends(get_analysis_lifecycle_service),
+    ],
+) -> StoredAnalysisContext:
+    """供前端刷新、恢复和展示分析时间线。"""
+
+    context = lifecycle.get_context(thread_id)
+
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"分析会话不存在：{thread_id}",
+        )
+
+    return context
 
 
 @router.post(
@@ -126,11 +201,11 @@ def create_evidence_analysis(
 )
 def analyze_change_with_evidence_legacy(
     request: EvidenceAnalysisRequest,
-    executor: Annotated[
-        EvidenceAnalysisExecutor,
-        Depends(get_evidence_analysis_executor),
+    lifecycle: Annotated[
+        EvidenceAnalysisLifecycleService,
+        Depends(get_analysis_lifecycle_service),
     ],
 ) -> EvidenceAnalysisResponse:
     """兼容迁移前调用方；第 4 步清理旧基线时删除。"""
 
-    return _execute_analysis(request, executor)
+    return _execute_analysis(request, lifecycle)

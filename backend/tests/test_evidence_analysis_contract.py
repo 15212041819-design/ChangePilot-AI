@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas.analysis_report import AnalysisReport
 from app.schemas.evidence_analysis_api import EvidenceAnalysisRequest
-from app.services.evidence_analysis import get_evidence_analysis_executor
+from app.services.evidence_analysis import (
+    get_evidence_analysis_executor,
+)
 
 # 复用现有 API 测试已经验证过的最小可信报告构造器。
 from tests.test_evidence_analysis_api import _build_ready_report
@@ -22,13 +24,15 @@ class FakeExecutor:
         return _build_ready_report()
 
 
-def test_canonical_analysis_endpoint_returns_frozen_status_fields() -> None:
+def test_canonical_analysis_endpoint_returns_frozen_status_fields(
+    api_client: TestClient,
+) -> None:
     """正式入口必须同时返回工作流状态和报告准入状态。"""
 
     app.dependency_overrides[get_evidence_analysis_executor] = FakeExecutor
 
     try:
-        response = TestClient(app).post(
+        response = api_client.post(
             "/api/v1/analyses",
             json={
                 "request_text": "  为订单系统增加取消订单功能  ",

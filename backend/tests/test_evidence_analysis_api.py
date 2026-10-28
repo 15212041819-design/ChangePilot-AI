@@ -24,6 +24,7 @@ from app.schemas.review import (
     ReviewReport,
 )
 from app.services.evidence_analysis import (
+    EvidenceAnalysisReviewRequiredError,
     get_evidence_analysis_executor,
 )
 
@@ -197,7 +198,9 @@ class FakeEvidenceAnalysisExecutor:
         return _build_ready_report()
 
 
-def test_evidence_analysis_endpoint_returns_unified_report() -> None:
+def test_evidence_analysis_endpoint_returns_unified_report(
+    api_client: TestClient,
+) -> None:
     """新接口应返回前端可直接消费的统一报告。"""
 
     executor = FakeEvidenceAnalysisExecutor()
@@ -205,7 +208,7 @@ def test_evidence_analysis_endpoint_returns_unified_report() -> None:
     app.dependency_overrides[get_evidence_analysis_executor] = lambda: executor
 
     try:
-        response = TestClient(app).post(
+        response = api_client.post(
             "/api/v1/changes/evidence/analyze",
             json={
                 "request_text": "  为订单系统增加取消订单功能  ",
@@ -226,6 +229,20 @@ def test_evidence_analysis_endpoint_returns_unified_report() -> None:
         assert executor.requests[0].repository_name == "order_service"
         assert executor.requests[0].commit == "HEAD"
 
+        stored_response = api_client.get(f"/api/v1/analyses/{body['thread_id']}")
+
+        assert stored_response.status_code == 200
+
+        stored = stored_response.json()
+
+        assert stored["thread"]["workflow_status"] == "completed"
+        assert stored["report"]["report_id"] == body["report"]["report_id"]
+        assert [event["event_type"] for event in stored["events"]] == [
+            "analysis.created",
+            "analysis.started",
+            "analysis.completed",
+        ]
+
     finally:
         app.dependency_overrides.pop(
             get_evidence_analysis_executor,
@@ -233,13 +250,15 @@ def test_evidence_analysis_endpoint_returns_unified_report() -> None:
         )
 
 
-def test_evidence_analysis_endpoint_rejects_blank_text() -> None:
+def test_evidence_analysis_endpoint_rejects_blank_text(
+    api_client: TestClient,
+) -> None:
     """只包含空格的需求不得进入执行层。"""
 
     app.dependency_overrides[get_evidence_analysis_executor] = FakeEvidenceAnalysisExecutor
 
     try:
-        response = TestClient(app).post(
+        response = api_client.post(
             "/api/v1/changes/evidence/analyze",
             json={
                 "request_text": "   ",
@@ -257,10 +276,12 @@ def test_evidence_analysis_endpoint_rejects_blank_text() -> None:
         )
 
 
-def test_evidence_analysis_endpoint_returns_404_for_unknown_repository() -> None:
+def test_evidence_analysis_endpoint_returns_404_for_unknown_repository(
+    api_client: TestClient,
+) -> None:
     """生产执行器已接线，未知仓库应返回 404 而不是旧的 503。"""
 
-    response = TestClient(app).post(
+    response = api_client.post(
         "/api/v1/changes/evidence/analyze",
         json={
             "request_text": "为订单系统增加取消订单功能",
@@ -272,7 +293,9 @@ def test_evidence_analysis_endpoint_returns_404_for_unknown_repository() -> None
     assert "不存在" in response.json()["detail"]
 
 
-def test_evidence_analysis_endpoint_converts_contract_error_to_502() -> None:
+def test_evidence_analysis_endpoint_converts_contract_error_to_502(
+    api_client: TestClient,
+) -> None:
     """执行层返回契约错误时应该标记为上游无效响应。"""
 
     class InvalidExecutor:
@@ -287,7 +310,7 @@ def test_evidence_analysis_endpoint_converts_contract_error_to_502() -> None:
     app.dependency_overrides[get_evidence_analysis_executor] = InvalidExecutor
 
     try:
-        response = TestClient(app).post(
+        response = api_client.post(
             "/api/v1/changes/evidence/analyze",
             json={
                 "request_text": "为订单系统增加取消订单功能",
@@ -298,6 +321,49 @@ def test_evidence_analysis_endpoint_converts_contract_error_to_502() -> None:
         assert response.status_code == 502
         assert response.json()["detail"] == "CandidateSet digest 不一致。"
 
+    finally:
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
+
+
+def test_review_required_response_contains_persisted_thread_id(
+    api_client: TestClient,
+) -> None:
+    """409 必须返回可供前端恢复审核流程的真实 thread_id。"""
+
+    class ReviewRequiredExecutor:
+        """模拟需求需要人工确认。"""
+
+        def analyze(
+            self,
+            request: EvidenceAnalysisRequest,
+        ) -> AnalysisReport:
+            raise EvidenceAnalysisReviewRequiredError("需求存在未确认假设。")
+
+    app.dependency_overrides[get_evidence_analysis_executor] = ReviewRequiredExecutor
+
+    try:
+        response = api_client.post(
+            "/api/v1/analyses",
+            json={
+                "request_text": "为订单系统增加取消订单功能",
+                "repository_name": "order_service",
+            },
+        )
+
+        assert response.status_code == 409
+
+        detail = response.json()["detail"]
+
+        assert len(detail["thread_id"]) == 32
+        assert detail["workflow_status"] == "awaiting_requirement_review"
+
+        stored = api_client.get(f"/api/v1/analyses/{detail['thread_id']}")
+
+        assert stored.status_code == 200
+        assert stored.json()["thread"]["workflow_status"] == "awaiting_requirement_review"
     finally:
         app.dependency_overrides.pop(
             get_evidence_analysis_executor,
