@@ -14,6 +14,7 @@ AnalysisWorkflowStatus = Literal[
     "awaiting_requirement_review",
     "completed",
     "failed",
+    "rejected",
 ]
 
 AnalysisRunStatus = Literal[

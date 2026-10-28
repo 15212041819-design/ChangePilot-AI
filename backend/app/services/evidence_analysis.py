@@ -48,11 +48,13 @@ from app.schemas.contracts import (
 )
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
+    EvidenceAnalysisReviewRequest,
 )
 from app.schemas.guard import GuardDigests
 from app.services.llm import get_chat_model
 from app.services.requirement_spec_agent import (
     analyze_requirement_spec,
+    approve_requirement_assumptions,
 )
 from app.services.semantic_context import (
     MIN_INDEX_COVERAGE,
@@ -99,6 +101,8 @@ class EvidenceAnalysisExecutor(Protocol):
     def analyze(
         self,
         request: EvidenceAnalysisRequest,
+        *,
+        review: EvidenceAnalysisReviewRequest | None = None,
     ) -> AnalysisReport:
         """执行完整分析并返回已审核的统一报告。"""
 
@@ -109,7 +113,7 @@ class ProductionEvidenceAnalysisExecutor:
     def __init__(
         self,
         *,
-        workspace_root: str | Path = (DEFAULT_WORKSPACE_ROOT),
+        workspace_root: str | Path = DEFAULT_WORKSPACE_ROOT,
         model: BaseChatModel | None = None,
     ) -> None:
         self._workspace_root = Path(workspace_root)
@@ -118,6 +122,8 @@ class ProductionEvidenceAnalysisExecutor:
     def analyze(
         self,
         request: EvidenceAnalysisRequest,
+        *,
+        review: EvidenceAnalysisReviewRequest | None = None,
     ) -> AnalysisReport:
         """在隔离的 Git 快照上执行完整分析。"""
 
@@ -133,8 +139,9 @@ class ProductionEvidenceAnalysisExecutor:
             ) as checkout:
                 return self._analyze_snapshot(
                     request,
-                    repository_path=(checkout.repository_path),
-                    resolved_commit=(checkout.resolved_commit),
+                    repository_path=checkout.repository_path,
+                    resolved_commit=checkout.resolved_commit,
+                    review=review,
                 )
 
         except (
@@ -149,6 +156,7 @@ class ProductionEvidenceAnalysisExecutor:
         *,
         repository_path: Path,
         resolved_commit: str,
+        review: EvidenceAnalysisReviewRequest | None,
     ) -> AnalysisReport:
         """分析已经隔离且固定到精确 commit 的仓库目录。"""
 
@@ -177,7 +185,9 @@ class ProductionEvidenceAnalysisExecutor:
         # 全部共享这一份索引和由它构建的依赖图。
         symbol_index = index_python_symbols(repository)
 
-        dependency_graph = build_python_dependency_graph(symbol_index)
+        dependency_graph = build_python_dependency_graph(
+            symbol_index,
+        )
 
         repository_vocabulary = build_repository_vocabulary(
             repository,
@@ -189,8 +199,18 @@ class ProductionEvidenceAnalysisExecutor:
         requirement_result = analyze_requirement_spec(
             request.request_text,
             repository_vocabulary=set(repository_vocabulary),
+            revision=2 if review is not None else 1,
+            review_action=review.action if review is not None else None,
+            review_feedback=review.feedback if review is not None else "",
             model=selected_model,
         )
+
+        # approve 表示人工已经确认本轮需求假设。
+        # 由确定性代码更新状态和摘要，不让模型自行生成 accepted。
+        if review is not None and review.action == "approve":
+            requirement_result = approve_requirement_assumptions(
+                requirement_result,
+            )
 
         unresolved_assumptions = tuple(
             assumption.id
@@ -211,10 +231,10 @@ class ProductionEvidenceAnalysisExecutor:
             repository,
             commit=resolved_commit,
             model=selected_model,
-            prebuilt_symbol_index=(symbol_index),
-            prebuilt_dependency_graph=(dependency_graph),
-            prebuilt_repository_vocabulary=(repository_vocabulary),
-            prebuilt_cochange_index=(cochange_index),
+            prebuilt_symbol_index=symbol_index,
+            prebuilt_dependency_graph=dependency_graph,
+            prebuilt_repository_vocabulary=repository_vocabulary,
+            prebuilt_cochange_index=cochange_index,
         )
 
         if semantic_context.index_coverage < MIN_INDEX_COVERAGE:
@@ -226,27 +246,23 @@ class ProductionEvidenceAnalysisExecutor:
             raise ValueError("冻结 CandidateSet 为空，不能启动并行分析。")
 
         digests = GuardDigests(
-            set_digest=(candidate_set.set_digest),
-            spec_digest=(candidate_set.spec_digest),
-            index_digest=(candidate_set.index_digest),
+            set_digest=candidate_set.set_digest,
+            spec_digest=candidate_set.spec_digest,
+            index_digest=candidate_set.index_digest,
         )
 
-        base_resources: dict[
-            str,
-            object,
-        ] = {
-            "requirement_spec": (requirement_result.spec),
-            "repository_snapshot": (repository),
-            "symbol_index": (symbol_index),
-            "dependency_graph": (dependency_graph),
-            "cochange_index": (cochange_index),
+        base_resources: dict[str, object] = {
+            "requirement_spec": requirement_result.spec,
+            "repository_snapshot": repository,
+            "symbol_index": symbol_index,
+            "dependency_graph": dependency_graph,
+            "cochange_index": cochange_index,
             # schema 索引器尚未接入时显式为空，
             # Risk Engine 不会猜测模型字段。
             "schema_models": (),
         }
 
-        # ChangePoint 是三个分支共享的中性、
-        # 已验证证据。
+        # ChangePoint 是三个分支共享的中性、已验证证据。
         impact_evidence = analyze_impact_evidence(
             candidate_set,
             digests,
@@ -257,13 +273,10 @@ class ProductionEvidenceAnalysisExecutor:
 
         branch_resources = {
             **base_resources,
-            "validated_change_points": (impact_evidence.change_points),
+            "validated_change_points": impact_evidence.change_points,
         }
 
-        resources: dict[
-            str,
-            object,
-        ] = {
+        resources: dict[str, object] = {
             resource_id: branch_resources,
         }
 
@@ -280,9 +293,9 @@ class ProductionEvidenceAnalysisExecutor:
             return impact_evidence.branch_result
 
         graph = build_parallel_analysis_graph(
-            impact_runner=(cached_impact_runner),
-            test_runner=(analyze_test_strategy),
-            risk_runner=(analyze_risks),
+            impact_runner=cached_impact_runner,
+            test_runner=analyze_test_strategy,
+            risk_runner=analyze_risks,
             resources=resources,
         )
 

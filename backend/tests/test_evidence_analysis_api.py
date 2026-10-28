@@ -16,7 +16,10 @@ from app.schemas.contracts import (
     RequirementSpec,
     ScopeHints,
 )
-from app.schemas.evidence_analysis_api import EvidenceAnalysisRequest
+from app.schemas.evidence_analysis_api import (
+    EvidenceAnalysisRequest,
+    EvidenceAnalysisReviewRequest,
+)
 from app.schemas.guard import GuardDigests
 from app.schemas.review import (
     AcceptanceCoverage,
@@ -187,14 +190,19 @@ def _build_ready_report() -> AnalysisReport:
 class FakeEvidenceAnalysisExecutor:
     """记录 API 传入值并返回可信报告的测试执行器。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
         self.requests: list[EvidenceAnalysisRequest] = []
 
     def analyze(
         self,
         request: EvidenceAnalysisRequest,
     ) -> AnalysisReport:
-        self.requests.append(request)
+        self.requests.append(
+            request,
+        )
+
         return _build_ready_report()
 
 
@@ -211,8 +219,8 @@ def test_evidence_analysis_endpoint_returns_unified_report(
         response = api_client.post(
             "/api/v1/changes/evidence/analyze",
             json={
-                "request_text": "  为订单系统增加取消订单功能  ",
-                "repository_name": "  order_service  ",
+                "request_text": ("  为订单系统增加取消订单功能  "),
+                "repository_name": ("  order_service  "),
                 "commit": "  HEAD  ",
             },
         )
@@ -284,8 +292,8 @@ def test_evidence_analysis_endpoint_returns_404_for_unknown_repository(
     response = api_client.post(
         "/api/v1/changes/evidence/analyze",
         json={
-            "request_text": "为订单系统增加取消订单功能",
-            "repository_name": "repository_that_does_not_exist",
+            "request_text": ("为订单系统增加取消订单功能"),
+            "repository_name": ("repository_that_does_not_exist"),
         },
     )
 
@@ -313,7 +321,7 @@ def test_evidence_analysis_endpoint_converts_contract_error_to_502(
         response = api_client.post(
             "/api/v1/changes/evidence/analyze",
             json={
-                "request_text": "为订单系统增加取消订单功能",
+                "request_text": ("为订单系统增加取消订单功能"),
                 "repository_name": "order_service",
             },
         )
@@ -348,7 +356,7 @@ def test_review_required_response_contains_persisted_thread_id(
         response = api_client.post(
             "/api/v1/analyses",
             json={
-                "request_text": "为订单系统增加取消订单功能",
+                "request_text": ("为订单系统增加取消订单功能"),
                 "repository_name": "order_service",
             },
         )
@@ -364,8 +372,151 @@ def test_review_required_response_contains_persisted_thread_id(
 
         assert stored.status_code == 200
         assert stored.json()["thread"]["workflow_status"] == "awaiting_requirement_review"
+
     finally:
         app.dependency_overrides.pop(
             get_evidence_analysis_executor,
             None,
         )
+
+
+def test_review_endpoint_approves_and_resumes_analysis(
+    api_client: TestClient,
+) -> None:
+    """正式审核接口应恢复同一会话并返回完整持久化上下文。"""
+
+    class ResumableExecutor:
+        """首次暂停，批准后完成。"""
+
+        def analyze(
+            self,
+            request: EvidenceAnalysisRequest,
+            *,
+            review: EvidenceAnalysisReviewRequest | None = None,
+        ) -> AnalysisReport:
+            if review is None:
+                raise EvidenceAnalysisReviewRequiredError("需求存在未确认假设。")
+
+            assert review.action == "approve"
+            assert review.feedback == "确认假设"
+
+            return _build_ready_report()
+
+    app.dependency_overrides[get_evidence_analysis_executor] = ResumableExecutor
+
+    try:
+        created = api_client.post(
+            "/api/v1/analyses",
+            json={
+                "request_text": ("为订单系统增加取消订单功能"),
+                "repository_name": "order_service",
+            },
+        )
+
+        thread_id = created.json()["detail"]["thread_id"]
+
+        response = api_client.post(
+            f"/api/v1/analyses/{thread_id}/reviews",
+            json={
+                "action": "approve",
+                "feedback": "  确认假设  ",
+                "actor_id": "reviewer-1",
+            },
+        )
+
+        assert response.status_code == 200
+
+        body = response.json()
+
+        assert body["thread"]["thread_id"] == thread_id
+        assert body["thread"]["workflow_status"] == "completed"
+        assert [run["status"] for run in body["runs"]] == [
+            "paused",
+            "completed",
+        ]
+        assert body["review_decisions"][0]["action"] == "approve"
+        assert body["report"]["overview"]["status"] == "ready"
+
+    finally:
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
+
+
+def test_review_endpoint_rejects_analysis_without_new_run(
+    api_client: TestClient,
+) -> None:
+    """reject 应持久化终止状态，且不再次调用分析执行器。"""
+
+    class ReviewOnlyExecutor:
+        """所有真实执行都要求审核。"""
+
+        calls = 0
+
+        def analyze(
+            self,
+            request: EvidenceAnalysisRequest,
+        ) -> AnalysisReport:
+            self.calls += 1
+
+            raise EvidenceAnalysisReviewRequiredError("需求存在未确认假设。")
+
+    executor = ReviewOnlyExecutor()
+
+    app.dependency_overrides[get_evidence_analysis_executor] = lambda: executor
+
+    try:
+        created = api_client.post(
+            "/api/v1/analyses",
+            json={
+                "request_text": ("为订单系统增加取消订单功能"),
+                "repository_name": "order_service",
+            },
+        )
+
+        thread_id = created.json()["detail"]["thread_id"]
+
+        response = api_client.post(
+            f"/api/v1/analyses/{thread_id}/reviews",
+            json={
+                "action": "reject",
+                "feedback": "暂不实施。",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["thread"]["workflow_status"] == "rejected"
+        assert len(response.json()["runs"]) == 1
+        assert executor.calls == 1
+
+    finally:
+        app.dependency_overrides.pop(
+            get_evidence_analysis_executor,
+            None,
+        )
+
+
+def test_review_endpoint_rejects_invalid_or_unknown_decision(
+    api_client: TestClient,
+) -> None:
+    """无反馈修订和未知会话的审核都必须被拒绝。"""
+
+    invalid = api_client.post(
+        "/api/v1/analyses/" + "a" * 32 + "/reviews",
+        json={
+            "action": "revise",
+            "feedback": "   ",
+        },
+    )
+
+    assert invalid.status_code == 422
+
+    unknown = api_client.post(
+        "/api/v1/analyses/" + "a" * 32 + "/reviews",
+        json={
+            "action": "approve",
+        },
+    )
+
+    assert unknown.status_code == 404

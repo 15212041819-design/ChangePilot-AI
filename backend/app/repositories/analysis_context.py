@@ -44,7 +44,10 @@ class AnalysisContextPersistenceError(RuntimeError):
 class SQLAlchemyAnalysisContextRepository:
     """为分析生命周期提供原子化、可测试的数据库操作。"""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+    ) -> None:
         self._session = session
 
     def create_thread(
@@ -80,7 +83,12 @@ class SQLAlchemyAnalysisContextRepository:
             },
         )
 
-        self._session.add_all([thread, event])
+        self._session.add_all(
+            [
+                thread,
+                event,
+            ]
+        )
         self._commit("无法创建分析会话。")
 
         return AnalysisThreadSnapshot.model_validate(thread)
@@ -101,6 +109,9 @@ class SQLAlchemyAnalysisContextRepository:
         if thread.workflow_status == "completed":
             raise AnalysisContextConflictError("已经完成的分析会话不能再次启动。")
 
+        if thread.workflow_status == "rejected":
+            raise AnalysisContextConflictError("已经拒绝的分析会话不能再次启动。")
+
         run = AnalysisRun(
             run_id=new_id(),
             thread_id=thread_id,
@@ -115,7 +126,9 @@ class SQLAlchemyAnalysisContextRepository:
         self._append_event(
             thread_id,
             "analysis.started",
-            {"run_id": run.run_id},
+            {
+                "run_id": run.run_id,
+            },
         )
         self._commit("无法启动分析运行。")
 
@@ -177,6 +190,7 @@ class SQLAlchemyAnalysisContextRepository:
 
         run.status = "paused"
         run.finished_at = utc_now()
+
         thread.workflow_status = "awaiting_requirement_review"
         thread.updated_at = utc_now()
 
@@ -203,7 +217,10 @@ class SQLAlchemyAnalysisContextRepository:
     ) -> ReviewDecisionSnapshot:
         """保存人工决定，不在仓储层擅自解释业务语义。"""
 
-        self._require_thread(thread_id)
+        thread = self._require_thread(thread_id)
+
+        if thread.workflow_status != "awaiting_requirement_review":
+            raise AnalysisContextConflictError("分析会话当前不需要人工审核。")
 
         decision = ReviewDecision(
             decision_id=new_id(),
@@ -225,6 +242,33 @@ class SQLAlchemyAnalysisContextRepository:
         self._commit("无法保存人工审核决定。")
 
         return ReviewDecisionSnapshot.model_validate(decision)
+
+    def reject_review(
+        self,
+        *,
+        thread_id: str,
+        feedback: str,
+    ) -> AnalysisThreadSnapshot:
+        """终止等待审核的会话，并保留可审计的拒绝原因。"""
+
+        thread = self._require_thread(thread_id)
+
+        if thread.workflow_status != "awaiting_requirement_review":
+            raise AnalysisContextConflictError("分析会话当前不需要人工审核。")
+
+        thread.workflow_status = "rejected"
+        thread.updated_at = utc_now()
+
+        self._append_event(
+            thread_id,
+            "analysis.rejected",
+            {
+                "feedback": feedback,
+            },
+        )
+        self._commit("无法保存人工拒绝状态。")
+
+        return AnalysisThreadSnapshot.model_validate(thread)
 
     def complete_run(
         self,
@@ -325,7 +369,9 @@ class SQLAlchemyAnalysisContextRepository:
 
         statement = (
             select(AnalysisThread)
-            .where(AnalysisThread.thread_id == thread_id)
+            .where(
+                AnalysisThread.thread_id == thread_id,
+            )
             .options(
                 selectinload(AnalysisThread.runs),
                 selectinload(AnalysisThread.checkpoints),
@@ -341,13 +387,17 @@ class SQLAlchemyAnalysisContextRepository:
             return None
 
         report = (
-            AnalysisReport.model_validate(thread.report.payload)
+            AnalysisReport.model_validate(
+                thread.report.payload,
+            )
             if thread.report is not None
             else None
         )
 
         return StoredAnalysisContext(
-            thread=AnalysisThreadSnapshot.model_validate(thread),
+            thread=AnalysisThreadSnapshot.model_validate(
+                thread,
+            ),
             runs=tuple(
                 AnalysisRunSnapshot.model_validate(item)
                 for item in sorted(
@@ -383,12 +433,19 @@ class SQLAlchemyAnalysisContextRepository:
         self,
         thread_id: str,
     ) -> AnalysisThread:
-        # 所有写操作都先锁住会话主记录，防止并发请求同时计算出相同的
-        # checkpoint/event sequence。SQLite 测试会忽略 FOR UPDATE，
-        # PostgreSQL 则会真正执行行级锁。
-        thread = self._session.scalar(
-            select(AnalysisThread).where(AnalysisThread.thread_id == thread_id).with_for_update()
+        """读取并锁定分析会话。"""
+
+        # PostgreSQL 会执行真实行级锁。
+        # SQLite 测试环境会安全忽略 FOR UPDATE。
+        statement = (
+            select(AnalysisThread)
+            .where(
+                AnalysisThread.thread_id == thread_id,
+            )
+            .with_for_update()
         )
+
+        thread = self._session.scalar(statement)
 
         if thread is None:
             raise AnalysisContextNotFoundError(f"分析会话不存在：{thread_id}")
@@ -399,7 +456,12 @@ class SQLAlchemyAnalysisContextRepository:
         self,
         run_id: str,
     ) -> AnalysisRun:
-        run = self._session.get(AnalysisRun, run_id)
+        """读取指定的分析运行。"""
+
+        run = self._session.get(
+            AnalysisRun,
+            run_id,
+        )
 
         if run is None:
             raise AnalysisContextNotFoundError(f"分析运行不存在：{run_id}")
@@ -410,8 +472,12 @@ class SQLAlchemyAnalysisContextRepository:
         self,
         thread_id: str,
     ) -> int:
+        """计算下一个检查点序号。"""
+
         current = self._session.scalar(
-            select(func.max(AnalysisCheckpoint.sequence)).where(
+            select(
+                func.max(AnalysisCheckpoint.sequence),
+            ).where(
                 AnalysisCheckpoint.thread_id == thread_id,
             )
         )
@@ -422,8 +488,12 @@ class SQLAlchemyAnalysisContextRepository:
         self,
         thread_id: str,
     ) -> int:
+        """计算下一个事件序号。"""
+
         current = self._session.scalar(
-            select(func.max(AnalysisEvent.sequence)).where(
+            select(
+                func.max(AnalysisEvent.sequence),
+            ).where(
                 AnalysisEvent.thread_id == thread_id,
             )
         )
@@ -436,6 +506,8 @@ class SQLAlchemyAnalysisContextRepository:
         event_type: str,
         payload: Mapping[str, Any],
     ) -> AnalysisEvent:
+        """在当前事务中追加一条时间线事件。"""
+
         event = AnalysisEvent(
             event_id=new_id(),
             thread_id=thread_id,
@@ -445,17 +517,26 @@ class SQLAlchemyAnalysisContextRepository:
         )
 
         self._session.add(event)
+
         return event
 
     def _commit(
         self,
         message: str,
     ) -> None:
+        """提交事务，并把 SQLAlchemy 异常转换为仓储异常。"""
+
         try:
             self._session.commit()
         except IntegrityError as exc:
             self._session.rollback()
-            raise AnalysisContextConflictError(message) from exc
+
+            raise AnalysisContextConflictError(
+                message,
+            ) from exc
         except SQLAlchemyError as exc:
             self._session.rollback()
-            raise AnalysisContextPersistenceError(message) from exc
+
+            raise AnalysisContextPersistenceError(
+                message,
+            ) from exc

@@ -15,6 +15,7 @@ from app.schemas.analysis_context import StoredAnalysisContext
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
     EvidenceAnalysisResponse,
+    EvidenceAnalysisReviewRequest,
 )
 from app.services.analysis_lifecycle import (
     EvidenceAnalysisLifecycleService,
@@ -93,7 +94,9 @@ def _execute_analysis(
     normalized_request = _normalize_request(request)
 
     try:
-        execution = lifecycle.execute(normalized_request)
+        execution = lifecycle.execute(
+            normalized_request,
+        )
 
     except PersistedEvidenceAnalysisReviewRequiredError as exc:
         raise HTTPException(
@@ -163,9 +166,12 @@ def create_evidence_analysis(
         Depends(get_analysis_lifecycle_service),
     ],
 ) -> EvidenceAnalysisResponse:
-    """正式产品入口；前端和后续持久化层只依赖这个路径。"""
+    """正式产品入口；前端和持久化层只依赖这个路径。"""
 
-    return _execute_analysis(request, lifecycle)
+    return _execute_analysis(
+        request,
+        lifecycle,
+    )
 
 
 @router.get(
@@ -182,7 +188,9 @@ def get_evidence_analysis_context(
 ) -> StoredAnalysisContext:
     """供前端刷新、恢复和展示分析时间线。"""
 
-    context = lifecycle.get_context(thread_id)
+    context = lifecycle.get_context(
+        thread_id,
+    )
 
     if context is None:
         raise HTTPException(
@@ -191,6 +199,75 @@ def get_evidence_analysis_context(
         )
 
     return context
+
+
+@router.post(
+    "/analyses/{thread_id}/reviews",
+    response_model=StoredAnalysisContext,
+    summary="提交需求人工审核决定并恢复分析",
+)
+def review_evidence_analysis(
+    thread_id: str,
+    request: EvidenceAnalysisReviewRequest,
+    lifecycle: Annotated[
+        EvidenceAnalysisLifecycleService,
+        Depends(get_analysis_lifecycle_service),
+    ],
+) -> StoredAnalysisContext:
+    """批准、修订或拒绝一个等待需求审核的正式分析。"""
+
+    try:
+        return lifecycle.submit_review(
+            thread_id=thread_id,
+            decision=request,
+        )
+
+    except PersistedEvidenceAnalysisReviewRequiredError as exc:
+        # revise 后仍有新假设时保持同一个 thread_id，再次等待审核。
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "thread_id": exc.thread_id,
+                "workflow_status": "awaiting_requirement_review",
+                "message": str(exc),
+            },
+        ) from exc
+
+    except AnalysisContextConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except AnalysisContextPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    except EvidenceAnalysisUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc) or type(exc).__name__,
+        ) from exc
 
 
 @router.post(
@@ -206,6 +283,9 @@ def analyze_change_with_evidence_legacy(
         Depends(get_analysis_lifecycle_service),
     ],
 ) -> EvidenceAnalysisResponse:
-    """兼容迁移前调用方；第 4 步清理旧基线时删除。"""
+    """兼容迁移前调用方；后续清理旧基线时删除。"""
 
-    return _execute_analysis(request, lifecycle)
+    return _execute_analysis(
+        request,
+        lifecycle,
+    )

@@ -12,7 +12,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.analysis_report import AnalysisReport
 from app.schemas.review import ReviewStatus
@@ -52,6 +52,45 @@ class EvidenceAnalysisRequest(BaseModel):
         description="要分析的 Git commit、分支或 tag",
         examples=["HEAD"],
     )
+
+
+class EvidenceAnalysisReviewRequest(BaseModel):
+    """人工审核正式分析时提交的稳定公开输入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["approve", "revise", "reject"] = Field(
+        description="批准现有假设、要求修订需求，或终止本次分析",
+    )
+
+    feedback: str = Field(
+        default="",
+        max_length=10_000,
+        description="审核意见；revise 和 reject 时必填",
+    )
+
+    actor_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description="可选的审核人员标识",
+    )
+
+    @model_validator(mode="after")
+    def normalize_and_validate_feedback(
+        self,
+    ) -> "EvidenceAnalysisReviewRequest":
+        """清理审核文本，并阻止无说明的修订或拒绝。"""
+
+        feedback = " ".join(self.feedback.split())
+        actor_id = " ".join(self.actor_id.split()) if self.actor_id else None
+
+        if self.action in {"revise", "reject"} and not feedback:
+            raise ValueError(f"{self.action} 操作必须提供审核反馈。")
+
+        self.feedback = feedback
+        self.actor_id = actor_id or None
+
+        return self
 
 
 class EvidenceAnalysisResponse(BaseModel):

@@ -172,12 +172,12 @@ def build_requirement_spec(
         ),
         entity_hints=_build_entity_hints(
             draft,
-            repository_vocabulary=(repository_vocabulary),
+            repository_vocabulary=repository_vocabulary,
         ),
         symbol_hints=(),
         constraints=tuple(sorted(set(draft.constraints))),
         assumptions=_build_assumptions(draft),
-        scope_hints=(scope_hints or ScopeHints()),
+        scope_hints=scope_hints or ScopeHints(),
         source_text=normalized_source,
         spec_digest=EMPTY_SHA256,
     )
@@ -186,11 +186,9 @@ def build_requirement_spec(
 
     spec = candidate.model_copy(
         update={
-            "spec_digest": (
-                compute_spec_digest(
-                    candidate,
-                    registry_digest=(registry_digest),
-                )
+            "spec_digest": compute_spec_digest(
+                candidate,
+                registry_digest=registry_digest,
             )
         }
     )
@@ -210,6 +208,8 @@ def analyze_requirement_spec(
     spec_id: str = "RS-0001",
     revision: int = 1,
     scope_hints: ScopeHints | None = None,
+    review_action: str | None = None,
+    review_feedback: str = "",
     model: BaseChatModel | None = None,
 ) -> RequirementSpecAgentResult:
     """调用 Requirement Agent，再使用确定性代码生成最终契约。"""
@@ -220,8 +220,22 @@ def analyze_requirement_spec(
         raise ValueError("变更需求不能为空。")
 
     parser = PydanticOutputParser(
-        pydantic_object=(RequirementSpecDraft),
+        pydantic_object=RequirementSpecDraft,
     )
+
+    normalized_feedback = " ".join(review_feedback.split())
+
+    if review_action == "approve":
+        review_context = (
+            "人工审核已经批准上一轮需求假设。请保留已确认语义，不要重新引入与反馈无关的新假设。"
+        )
+    elif review_action == "revise":
+        review_context = f"人工审核要求修订上一轮需求分析。修订反馈：{normalized_feedback}"
+    else:
+        review_context = "当前没有人工审核反馈。"
+
+    if normalized_feedback and review_action == "approve":
+        review_context += f"审核补充说明：{normalized_feedback}"
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -231,7 +245,10 @@ def analyze_requirement_spec(
             ),
             (
                 "human",
-                ("请分析以下软件变更需求：\n\n{request_text}"),
+                (
+                    "请分析以下软件变更需求：\n\n{request_text}"
+                    "\n\n人工审核上下文：\n{review_context}"
+                ),
             ),
         ]
     )
@@ -242,17 +259,55 @@ def analyze_requirement_spec(
 
     draft = chain.invoke(
         {
-            "request_text": (normalized_request),
-            "format_instructions": (parser.get_format_instructions()),
+            "request_text": normalized_request,
+            "review_context": review_context,
+            "format_instructions": parser.get_format_instructions(),
         }
     )
 
     return build_requirement_spec(
         draft,
         source_text=normalized_request,
-        repository_vocabulary=(repository_vocabulary),
+        repository_vocabulary=repository_vocabulary,
         registry=registry,
         spec_id=spec_id,
         revision=revision,
         scope_hints=scope_hints,
+    )
+
+
+def approve_requirement_assumptions(
+    result: RequirementSpecAgentResult,
+) -> RequirementSpecAgentResult:
+    """把审核人员已批准的假设转为 accepted，并重新计算契约摘要。"""
+
+    accepted_assumptions = tuple(
+        assumption.model_copy(
+            update={"status": "accepted"},
+        )
+        for assumption in result.spec.assumptions
+    )
+
+    candidate = result.spec.model_copy(
+        update={
+            "assumptions": accepted_assumptions,
+            "spec_digest": EMPTY_SHA256,
+        }
+    )
+
+    spec = candidate.model_copy(
+        update={
+            "spec_digest": compute_spec_digest(
+                candidate,
+                registry_digest=compute_registry_digest(
+                    result.registry,
+                ),
+            )
+        }
+    )
+
+    return RequirementSpecAgentResult(
+        spec=spec,
+        registry=result.registry,
+        draft=result.draft,
     )
