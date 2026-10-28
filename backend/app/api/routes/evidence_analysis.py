@@ -1,4 +1,4 @@
-"""Evidence-grounded 分析的 HTTP 入口。"""
+"""Evidence-grounded 正式分析 API 的 HTTP 入口。"""
 
 from typing import Annotated
 from uuid import uuid4
@@ -16,25 +16,13 @@ from app.services.evidence_analysis import (
     get_evidence_analysis_executor,
 )
 
-router = APIRouter(
-    prefix="/changes",
-    tags=["Changes"],
-)
+router = APIRouter(tags=["Analysis"])
 
 
-@router.post(
-    "/evidence/analyze",
-    response_model=EvidenceAnalysisResponse,
-    summary="运行证据驱动的软件变更分析",
-)
-def analyze_change_with_evidence(
+def _normalize_request(
     request: EvidenceAnalysisRequest,
-    executor: Annotated[
-        EvidenceAnalysisExecutor,
-        Depends(get_evidence_analysis_executor),
-    ],
-) -> EvidenceAnalysisResponse:
-    """校验 HTTP 输入，委托执行器，并返回统一报告。"""
+) -> EvidenceAnalysisRequest:
+    """统一清理公开输入，禁止空白字符串进入执行层。"""
 
     request_text = request.request_text.strip()
     repository_name = request.repository_name.strip()
@@ -58,7 +46,7 @@ def analyze_change_with_evidence(
             detail="Git commit 不能为空。",
         )
 
-    normalized_request = request.model_copy(
+    return request.model_copy(
         update={
             "request_text": request_text,
             "repository_name": repository_name,
@@ -66,32 +54,40 @@ def analyze_change_with_evidence(
         }
     )
 
+
+def _execute_analysis(
+    request: EvidenceAnalysisRequest,
+    executor: EvidenceAnalysisExecutor,
+) -> EvidenceAnalysisResponse:
+    """执行统一错误映射，并构造冻结后的成功响应。"""
+
+    normalized_request = _normalize_request(request)
+
     try:
         report = executor.analyze(normalized_request)
 
     except EvidenceAnalysisReviewRequiredError as exc:
-        # 需求存在未确认假设时，不允许系统擅自批准。
+        # 第 3 步接入 PostgreSQL 后，这个状态会被保存并允许恢复。
+        # 当前同步接口先使用 409 明确表示需要人工介入。
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 
     except EvidenceAnalysisUnavailableError as exc:
-        # 请求使用了尚未安全实现的能力，例如历史 commit 快照。
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
 
     except (FileNotFoundError, NotADirectoryError) as exc:
-        # 仓库不存在或解析结果不是目录。
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
 
     except (KeyError, TypeError, ValueError) as exc:
-        # 契约、digest 或组装错误表示上游分析结果不可信。
+        # digest、契约或结果组装错误不能伪装成成功报告。
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc) or type(exc).__name__,
@@ -99,6 +95,42 @@ def analyze_change_with_evidence(
 
     return EvidenceAnalysisResponse(
         thread_id=uuid4().hex,
+        workflow_status="completed",
         status=report.overview.status,
         report=report,
     )
+
+
+@router.post(
+    "/analyses",
+    response_model=EvidenceAnalysisResponse,
+    summary="创建证据驱动的软件变更分析",
+)
+def create_evidence_analysis(
+    request: EvidenceAnalysisRequest,
+    executor: Annotated[
+        EvidenceAnalysisExecutor,
+        Depends(get_evidence_analysis_executor),
+    ],
+) -> EvidenceAnalysisResponse:
+    """正式产品入口；前端和后续持久化层只依赖这个路径。"""
+
+    return _execute_analysis(request, executor)
+
+
+@router.post(
+    "/changes/evidence/analyze",
+    response_model=EvidenceAnalysisResponse,
+    summary="兼容旧的 Evidence-grounded 分析路径",
+    deprecated=True,
+)
+def analyze_change_with_evidence_legacy(
+    request: EvidenceAnalysisRequest,
+    executor: Annotated[
+        EvidenceAnalysisExecutor,
+        Depends(get_evidence_analysis_executor),
+    ],
+) -> EvidenceAnalysisResponse:
+    """兼容迁移前调用方；第 4 步清理旧基线时删除。"""
+
+    return _execute_analysis(request, executor)
