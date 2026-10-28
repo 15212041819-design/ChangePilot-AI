@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: changepilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: changepilot
+      POSTGRES_USER: changepilot
+      POSTGRES_PASSWORD: changepilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - changepilot_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U changepilot -d changepilot
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  changepilot_postgres_data:
