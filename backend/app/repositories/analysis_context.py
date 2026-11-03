@@ -20,6 +20,8 @@ from app.db.models import (
 from app.schemas.analysis_context import (
     AnalysisCheckpointSnapshot,
     AnalysisEventSnapshot,
+    AnalysisHistoryItem,
+    AnalysisHistoryPage,
     AnalysisRunSnapshot,
     AnalysisThreadSnapshot,
     ReviewAction,
@@ -427,6 +429,35 @@ class SQLAlchemyAnalysisContextRepository:
                 )
             ),
             report=report,
+        )
+
+    def list_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        report_only: bool = False,
+    ) -> AnalysisHistoryPage:
+        """按更新时间读取轻量历史卡片；报告列表仅显示已有报告的会话。"""
+
+        statement = select(AnalysisThread)
+        if report_only:
+            statement = statement.where(AnalysisThread.report.has())
+        statement = (
+            statement.order_by(
+                AnalysisThread.updated_at.desc(),
+                AnalysisThread.thread_id.desc(),
+            )
+            .offset(offset)
+            .limit(limit + 1)
+        )
+        try:
+            threads = self._session.scalars(statement).all()
+        except SQLAlchemyError as exc:
+            raise AnalysisContextPersistenceError("无法读取分析历史。") from exc
+        return AnalysisHistoryPage(
+            items=tuple(AnalysisHistoryItem.model_validate(thread) for thread in threads[:limit]),
+            has_more=len(threads) > limit,
         )
 
     def _require_thread(

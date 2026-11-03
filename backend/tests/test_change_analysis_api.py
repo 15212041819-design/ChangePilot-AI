@@ -11,13 +11,14 @@
 
 from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from app.api.routes.changes import get_change_analysis_graph
+from app.api.routes.changes import router as legacy_changes_router
 from app.graph.change_analysis import build_change_analysis_graph
-from app.main import app
 from app.schemas.code_impact import (
     CodeImpactAnalysis,
     ImpactedFile,
@@ -52,6 +53,10 @@ from app.services.test_strategy_agent import (
 from app.tools.code_impact_validator import (
     CodeImpactValidationError,
 )
+
+# 旧工作流仅在测试中挂载；产品默认路由不再暴露它。
+app = FastAPI()
+app.include_router(legacy_changes_router, prefix="/api/v1")
 
 
 def fake_requirement_analyzer(

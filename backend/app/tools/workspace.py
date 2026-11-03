@@ -62,3 +62,24 @@ def resolve_repository_directory(
         raise NotADirectoryError(f"代码仓库路径不是目录：{normalized_name}")
 
     return resolved_repository
+
+
+def list_repository_names(
+    *,
+    workspace_root: str | Path = DEFAULT_WORKSPACE_ROOT,
+) -> tuple[str, ...]:
+    """列出工作区直属仓库，不把绝对路径或外部符号链接暴露给前端。"""
+
+    root = Path(workspace_root).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"工作区根目录不存在：{root}")
+
+    names: list[str] = []
+    for child in root.iterdir():
+        if child.name.startswith(".") or not child.is_dir():
+            continue
+        if child.is_symlink() or not child.resolve().is_relative_to(root):
+            continue
+        names.append(child.name)
+
+    return tuple(sorted(names, key=str.casefold))

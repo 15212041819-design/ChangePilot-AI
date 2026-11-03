@@ -122,3 +122,23 @@ class StoredAnalysisContext(ContextSnapshotModel):
     review_decisions: tuple[ReviewDecisionSnapshot, ...]
     events: tuple[AnalysisEventSnapshot, ...]
     report: AnalysisReport | None = None
+
+
+class AnalysisHistoryItem(ContextSnapshotModel):
+    """历史列表只传卡片所需字段，避免一次加载完整报告和时间线。"""
+
+    thread_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repository_name: str
+    commit_ref: str
+    request_text: str
+    workflow_status: AnalysisWorkflowStatus
+    review_status: ReviewStatus | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisHistoryPage(ContextSnapshotModel):
+    """可按页继续读取的历史会话列表。"""
+
+    items: tuple[AnalysisHistoryItem, ...]
+    has_more: bool

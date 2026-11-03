@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_database_session
@@ -11,7 +11,7 @@ from app.repositories.analysis_context import (
     AnalysisContextPersistenceError,
     SQLAlchemyAnalysisContextRepository,
 )
-from app.schemas.analysis_context import StoredAnalysisContext
+from app.schemas.analysis_context import AnalysisHistoryPage, StoredAnalysisContext
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
     EvidenceAnalysisResponse,
@@ -175,6 +175,35 @@ def create_evidence_analysis(
 
 
 @router.get(
+    "/analyses",
+    response_model=AnalysisHistoryPage,
+    summary="分页查询已保存的分析历史",
+)
+def list_evidence_analyses(
+    lifecycle: Annotated[
+        EvidenceAnalysisLifecycleService,
+        Depends(get_analysis_lifecycle_service),
+    ],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    report_only: bool = False,
+) -> AnalysisHistoryPage:
+    """历史卡片只读取摘要；点击卡片后再请求完整上下文。"""
+
+    try:
+        return lifecycle.list_history(
+            limit=limit,
+            offset=offset,
+            report_only=report_only,
+        )
+    except AnalysisContextPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
     "/analyses/{thread_id}",
     response_model=StoredAnalysisContext,
     summary="查询已持久化的软件变更分析上下文",
@@ -268,24 +297,3 @@ def review_evidence_analysis(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc) or type(exc).__name__,
         ) from exc
-
-
-@router.post(
-    "/changes/evidence/analyze",
-    response_model=EvidenceAnalysisResponse,
-    summary="兼容旧的 Evidence-grounded 分析路径",
-    deprecated=True,
-)
-def analyze_change_with_evidence_legacy(
-    request: EvidenceAnalysisRequest,
-    lifecycle: Annotated[
-        EvidenceAnalysisLifecycleService,
-        Depends(get_analysis_lifecycle_service),
-    ],
-) -> EvidenceAnalysisResponse:
-    """兼容迁移前调用方；后续清理旧基线时删除。"""
-
-    return _execute_analysis(
-        request,
-        lifecycle,
-    )

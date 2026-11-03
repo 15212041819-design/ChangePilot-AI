@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: changepilot
+          POSTGRES_USER: changepilot
+          POSTGRES_PASSWORD: changepilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U changepilot -d changepilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://changepilot:changepilot@127.0.0.1:5432/changepilot
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install backend and test dependencies
+        run: python -m pip install -e './backend[dev]'
+      - name: Configure Git identity for isolated repository tests
+        run: |
+          git config --global user.name "ChangePilot CI"
+          git config --global user.email "ci@example.invalid"
+      - name: Lint and format
+        working-directory: backend
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Apply database migrations
+        working-directory: backend
+        run: python -m alembic upgrade head
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Check browser script syntax
+        run: node --check frontend/app.js

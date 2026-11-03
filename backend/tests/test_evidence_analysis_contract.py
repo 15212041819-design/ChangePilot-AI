@@ -58,13 +58,12 @@ def test_canonical_analysis_endpoint_returns_frozen_status_fields(
         )
 
 
-def test_legacy_evidence_path_is_available_but_deprecated() -> None:
-    """迁移期间保留旧路径，但 OpenAPI 必须明确标记 deprecated。"""
+def test_legacy_paths_are_not_in_product_openapi() -> None:
+    """产品默认路由只公布正式分析接口。"""
 
     document = TestClient(app).get("/openapi.json").json()
 
     canonical = document["paths"]["/api/v1/analyses"]["post"]
-    legacy = document["paths"]["/api/v1/changes/evidence/analyze"]["post"]
-
     assert canonical.get("deprecated") is not True
-    assert legacy["deprecated"] is True
+    assert "/api/v1/changes/evidence/analyze" not in document["paths"]
+    assert "/api/v1/changes/analyze" not in document["paths"]

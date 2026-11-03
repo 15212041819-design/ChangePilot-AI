@@ -217,7 +217,7 @@ def test_evidence_analysis_endpoint_returns_unified_report(
 
     try:
         response = api_client.post(
-            "/api/v1/changes/evidence/analyze",
+            "/api/v1/analyses",
             json={
                 "request_text": ("  为订单系统增加取消订单功能  "),
                 "repository_name": ("  order_service  "),
@@ -258,6 +258,76 @@ def test_evidence_analysis_endpoint_returns_unified_report(
         )
 
 
+def test_analysis_history_lists_saved_reports_without_loading_report_payload(
+    api_client: TestClient,
+) -> None:
+    """历史报告按页返回摘要，详情仍由单会话接口读取。"""
+
+    app.dependency_overrides[get_evidence_analysis_executor] = FakeEvidenceAnalysisExecutor
+    try:
+        response = api_client.post(
+            "/api/v1/analyses",
+            json={
+                "request_text": "订单需求",
+                "repository_name": "order_service",
+                "commit": "HEAD",
+            },
+        )
+        assert response.status_code == 200
+        completed_id = response.json()["thread_id"]
+
+        class ReviewRequiredExecutor:
+            def analyze(self, request: EvidenceAnalysisRequest) -> AnalysisReport:
+                raise EvidenceAnalysisReviewRequiredError("请确认需求假设。")
+
+        app.dependency_overrides[get_evidence_analysis_executor] = ReviewRequiredExecutor
+        paused = api_client.post(
+            "/api/v1/analyses",
+            json={
+                "request_text": "另一个待确认需求",
+                "repository_name": "order_service",
+                "commit": "HEAD",
+            },
+        )
+        assert paused.status_code == 409
+        paused_id = paused.json()["detail"]["thread_id"]
+
+        first = api_client.get("/api/v1/analyses?report_only=true&limit=1")
+        assert first.status_code == 200
+        assert first.json()["has_more"] is False
+        assert len(first.json()["items"]) == 1
+        assert first.json()["items"][0]["thread_id"] == completed_id
+        assert "report" not in first.json()["items"][0]
+        assert "events" not in first.json()["items"][0]
+
+        second = api_client.get("/api/v1/analyses?limit=1")
+        assert second.status_code == 200
+        assert second.json()["has_more"] is True
+        third = api_client.get("/api/v1/analyses?limit=1&offset=1")
+        assert third.status_code == 200
+        assert third.json()["has_more"] is False
+        timeline_ids = {
+            second.json()["items"][0]["thread_id"],
+            third.json()["items"][0]["thread_id"],
+        }
+        assert timeline_ids == {completed_id, paused_id}
+
+        detail = api_client.get(f"/api/v1/analyses/{completed_id}")
+        assert detail.status_code == 200
+        assert detail.json()["report"] is not None
+        assert len(detail.json()["events"]) > 0
+    finally:
+        app.dependency_overrides.pop(get_evidence_analysis_executor, None)
+
+
+def test_analysis_history_validates_pagination(api_client: TestClient) -> None:
+    """非法分页参数不能执行无界历史查询。"""
+
+    assert api_client.get("/api/v1/analyses?limit=0").status_code == 422
+    assert api_client.get("/api/v1/analyses?limit=51").status_code == 422
+    assert api_client.get("/api/v1/analyses?offset=-1").status_code == 422
+
+
 def test_evidence_analysis_endpoint_rejects_blank_text(
     api_client: TestClient,
 ) -> None:
@@ -267,7 +337,7 @@ def test_evidence_analysis_endpoint_rejects_blank_text(
 
     try:
         response = api_client.post(
-            "/api/v1/changes/evidence/analyze",
+            "/api/v1/analyses",
             json={
                 "request_text": "   ",
                 "repository_name": "order_service",
@@ -290,7 +360,7 @@ def test_evidence_analysis_endpoint_returns_404_for_unknown_repository(
     """生产执行器已接线，未知仓库应返回 404 而不是旧的 503。"""
 
     response = api_client.post(
-        "/api/v1/changes/evidence/analyze",
+        "/api/v1/analyses",
         json={
             "request_text": ("为订单系统增加取消订单功能"),
             "repository_name": ("repository_that_does_not_exist"),
@@ -319,7 +389,7 @@ def test_evidence_analysis_endpoint_converts_contract_error_to_502(
 
     try:
         response = api_client.post(
-            "/api/v1/changes/evidence/analyze",
+            "/api/v1/analyses",
             json={
                 "request_text": ("为订单系统增加取消订单功能"),
                 "repository_name": "order_service",

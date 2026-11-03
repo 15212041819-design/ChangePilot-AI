@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101d2d" />
+    <meta name="description" content="ChangePilot AI：基于真实代码证据的软件变更分析。" />
+    <title>ChangePilot AI · 变更分析工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./experience.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M18 5v4m-3-4h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+              <rect x="5.5" y="10" width="25" height="20" rx="6" stroke="currentColor" stroke-width="2.2" />
+              <path d="M5.5 17H3m27.5 0H33M12 25h12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+              <circle cx="13" cy="19" r="2" fill="currentColor" />
+              <circle cx="23" cy="19" r="2" fill="currentColor" />
+            </svg>
+          </span>
+          <div><strong>ChangePilot</strong><small>AI · CHANGE INTELLIGENCE</small></div>
+        </div>
+        <div class="sidebar-label">工作空间</div>
+        <nav aria-label="主导航">
+          <a class="nav-active" href="#analysis" data-view="analysis" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">◈</span><span>变更分析</span>
+          </a>
+          <a href="#report" data-view="report">
+            <span class="nav-icon" aria-hidden="true">▤</span><span>分析报告</span>
+          </a>
+          <a href="#timeline" data-view="timeline">
+            <span class="nav-icon" aria-hidden="true">◷</span><span>分析时间线</span>
+          </a>
+        </nav>
+        <div class="sidebar-bottom">
+          <span class="status-dot"></span> 本地开发工作台
+          <small>API 1.0 · 证据驱动流程</small>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-inner">
+            <div class="breadcrumb">工作空间 <span>/</span> <b id="breadcrumb-current">变更分析</b></div>
+            <div class="top-right">
+              <span id="service-status" class="service-status checking" role="status" aria-live="polite">正在检查服务</span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content">
+          <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+          <section id="view-analysis" class="view" aria-label="变更分析">
+            <div class="hero">
+              <div class="hero-copy">
+                <div class="eyebrow">CHANGE INTELLIGENCE</div>
+                <h1>让每一次代码变更<em>都有据可循。</em></h1>
+                <p>选择仓库、描述需求，快速查看真实代码中的影响、测试建议与风险。</p>
+              </div>
+              <div class="hero-art" aria-hidden="true">
+                <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="art-core">✦</div>
+              </div>
+            </div>
+
+            <div class="workspace-grid">
+              <section class="panel form-panel" aria-labelledby="form-title">
+                <div class="panel-heading">
+                  <div><span class="step">01</span><h2 id="form-title">启动一次分析</h2></div>
+                  <span class="panel-tag">NEW ANALYSIS</span>
+                </div>
+                <form id="analysis-form">
+                  <fieldset class="form-group">
+                    <legend>分析对象 <span class="required-legend">* 为必填</span></legend>
+                    <div class="field-grid">
+                      <div class="field">
+                        <label for="repository-name">代码仓库 <span class="required" aria-hidden="true">*</span></label>
+                        <div class="field-with-icon">
+                          <span aria-hidden="true">⌁</span>
+                          <select id="repository-name" name="repository_name" required disabled aria-describedby="repository-help">
+                            <option value="">正在读取仓库…</option>
+                          </select>
+                        </div>
+                        <div class="field-help-row">
+                          <p class="field-hint" id="repository-help">从项目 sample_repos 目录中选择仓库。</p>
+                          <button id="retry-repositories" class="text-button hidden" type="button">重试连接</button>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <label for="commit-ref">Git 快照 <span class="required" aria-hidden="true">*</span></label>
+                        <div class="field-with-icon">
+                          <span aria-hidden="true">⑂</span>
+                          <input id="commit-ref" name="commit" value="HEAD" required maxlength="200" aria-describedby="commit-help" />
+                        </div>
+                        <p class="field-hint" id="commit-help">必填，已默认填入 HEAD；也可改为分支名或提交号。</p>
+                      </div>
+                    </div>
+                  </fieldset>
+
+                  <fieldset class="form-group change-group">
+                    <legend>变更内容 <span class="required-legend">* 为必填</span></legend>
+                    <label for="request-text">变更需求 <span class="required" aria-hidden="true">*</span></label>
+                    <textarea id="request-text" name="request_text" rows="4" required maxlength="10000" placeholder="描述希望改变的行为、限制条件和验收结果"></textarea>
+                    <button id="fill-example" class="text-button example-button" type="button">填入订单取消示例 <span aria-hidden="true">↗</span></button>
+                  </fieldset>
+
+                  <div class="form-actions">
+                    <p>真实分析会调用 DeepSeek 并消耗 Token；离线示例不会。</p>
+                    <button class="primary-button" type="submit" id="submit-button">开始分析</button>
+                  </div>
+                </form>
+              </section>
+
+              <div class="right-column">
+                <section class="panel process-panel" aria-labelledby="process-title">
+                  <div class="panel-heading"><div><span class="step">02</span><h2 id="process-title">分析流程</h2></div></div>
+                  <div class="process-list">
+                    <div class="process-stage is-current" data-stage="1">
+                      <span class="process-icon" aria-hidden="true">⌁</span>
+                      <div><strong>选择代码仓库</strong><p>使用已有仓库，指定要分析的 Git 快照</p></div>
+                    </div>
+                    <div class="process-stage" data-stage="2">
+                      <span class="process-icon" aria-hidden="true">◇</span>
+                      <div><strong>梳理变更需求</strong><p>确认目标与验收标准，定位相关代码</p></div>
+                    </div>
+                    <div class="process-stage" data-stage="3">
+                      <span class="process-icon" aria-hidden="true">▤</span>
+                      <div><strong>并行分析与审核</strong><p>汇总影响、测试、风险和实施门禁</p></div>
+                    </div>
+                  </div>
+                </section>
+                <button id="demo-button" class="sample-card" type="button">
+                  <span class="sample-kicker">离线示例 · 无需等待</span>
+                  <strong>先看看报告长什么样？</strong>
+                  <span class="sample-description">使用内置示例预览，不发起分析或写入数据库。</span>
+                  <span class="sample-cta">打开离线示例 <span aria-hidden="true">→</span></span>
+                </button>
+              </div>
+            </div>
+
+            <section class="panel session-panel" aria-labelledby="session-title">
+              <div class="panel-heading"><div><span class="step">03</span><h2 id="session-title">继续已有分析</h2></div></div>
+              <form id="resume-form" class="resume-form">
+                <label for="thread-id">分析会话 ID <span class="required" aria-hidden="true">*</span> <span class="field-optional">可用最近一次会话回填</span></label>
+                <div class="resume-controls">
+                  <input id="thread-id" name="thread_id" placeholder="输入 32 位分析会话 ID" pattern="[0-9a-f]{32}" autocomplete="off" required />
+                  <button class="secondary-button" type="submit">调取会话</button>
+                </div>
+              </form>
+              <button id="recent-thread" class="recent-thread hidden" type="button" aria-label="填入最近一次分析会话 ID"></button>
+            </section>
+          </section>
+
+          <section id="view-report" class="view hidden" aria-label="分析报告">
+            <div class="view-intro"><div><span class="eyebrow">ANALYSIS REPORT</span><h1>历史分析报告</h1><p>选择一份已保存的报告，查看代码影响、测试建议与风险。</p></div></div>
+            <div id="report-empty" class="empty-state">
+              <span class="empty-icon" aria-hidden="true">▤</span>
+              <h2>还没有分析报告</h2>
+              <p>先启动一次分析，或读取已有会话。也可以打开离线示例预览报告。</p>
+              <button type="button" class="secondary-button" data-view-target="analysis">前往变更分析</button>
+            </div>
+            <div id="report-history" class="history-section hidden">
+              <div class="history-heading"><div><h2>已保存的报告</h2><p>点击卡片查看完整内容</p></div><button class="secondary-button" type="button" data-refresh-history="report">刷新列表</button></div>
+              <div id="report-cards" class="history-grid"></div>
+              <button id="report-more" class="secondary-button history-more hidden" type="button">加载更多报告</button>
+            </div>
+            <button id="report-back" class="secondary-button detail-back hidden" type="button">← 返回历史报告</button>
+            <div id="result-area" class="result-area hidden" aria-live="polite"></div>
+          </section>
+
+          <section id="view-timeline" class="view hidden" aria-label="分析时间线">
+            <div class="view-intro"><div><span class="eyebrow">ANALYSIS TIMELINE</span><h1>历史分析时间线</h1><p>选择一次分析，查看按时间保存的处理记录。</p></div></div>
+            <div id="timeline-empty" class="empty-state">
+              <span class="empty-icon" aria-hidden="true">◷</span>
+              <h2>还没有时间线</h2>
+              <p>完成分析或读取已有会话后，这里会显示已保存的处理记录。</p>
+              <button type="button" class="secondary-button" data-view-target="analysis">前往变更分析</button>
+            </div>
+            <div id="timeline-history" class="history-section hidden">
+              <div class="history-heading"><div><h2>已保存的会话</h2><p>点击卡片查看该次分析的时间线</p></div><button class="secondary-button" type="button" data-refresh-history="timeline">刷新列表</button></div>
+              <div id="timeline-cards" class="history-grid"></div>
+              <button id="timeline-more" class="secondary-button history-more hidden" type="button">加载更多会话</button>
+            </div>
+            <button id="timeline-back" class="secondary-button detail-back hidden" type="button">← 返回历史时间线</button>
+            <div id="timeline-area" class="timeline-area hidden" aria-live="polite"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

@@ -7,7 +7,7 @@ from app.repositories.analysis_context import (
     AnalysisContextConflictError,
     SQLAlchemyAnalysisContextRepository,
 )
-from app.schemas.analysis_context import StoredAnalysisContext
+from app.schemas.analysis_context import AnalysisHistoryPage, StoredAnalysisContext
 from app.schemas.analysis_report import AnalysisReport
 from app.schemas.evidence_analysis_api import (
     EvidenceAnalysisRequest,
@@ -116,6 +116,21 @@ class EvidenceAnalysisLifecycleService:
 
         return self._repository.get_context(
             thread_id,
+        )
+
+    def list_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        report_only: bool = False,
+    ) -> AnalysisHistoryPage:
+        """提供前端历史列表，并复用仓储的轻量查询。"""
+
+        return self._repository.list_history(
+            limit=limit,
+            offset=offset,
+            report_only=report_only,
         )
 
     def submit_review(

@@ -6,9 +6,11 @@ venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+backend/build/
 
 # 测试和代码检查缓存
 .pytest_cache/
+.pytest_isolated_tmp/
 .ruff_cache/
 .coverage
 htmlcov/
