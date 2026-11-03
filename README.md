@@ -80,6 +80,8 @@ python -m http.server 5173 --bind 127.0.0.1
 
 ## 检查与贡献
 
+项目分层、正式分析链路、API 契约、数据库表、前端交互及开发排障，见 [完整开发文档](docs/DEVELOPMENT.md)。
+
 ```powershell
 cd backend
 ..\.venv\Scripts\python.exe -m ruff check .
